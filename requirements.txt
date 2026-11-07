@@ -1,0 +1,5 @@
+langgraph
+langchain-google-genai
+pytest
+ruff
+python-dotenv
