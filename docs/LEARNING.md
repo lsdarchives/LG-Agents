@@ -92,7 +92,7 @@ Project layout you'll end up with:
 main.py            # CLI entry point
 runs/              # per-run logs (gitignored)
 docs/
-  tasks.md         # sample tasks to test the system with
+  03-tasks.md      # sample tasks to test the system with
 devteam/
   __init__.py
   state.py         # the shared state definition

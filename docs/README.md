@@ -3,19 +3,16 @@
 Project spec and build order live in [../CLAUDE.md](../CLAUDE.md), which stays at the repo root so
 Claude Code loads it automatically. Everything else is here.
 
-## Existing
+## Reading order
 
-| Doc | What it's for |
-|---|---|
-| [LEARNING.md](LEARNING.md) | The guide, written for other developers: core concepts, architecture, a walkthrough per build step, how to adapt the pattern, FAQ, troubleshooting, glossary |
-| [setup.md](setup.md) | Set up the environment from scratch and run each step's check |
-| [tasks.md](tasks.md) | The 5 test tasks the dev team is evaluated on |
+| # | Doc | What it's for | Status |
+|---|---|---|---|
+| 01 | [01-setup.md](01-setup.md) | Set up the environment from scratch and run each step's check | Done; a check is added per step |
+| 02 | [LEARNING.md](LEARNING.md) | The guide, written for other developers: core concepts, architecture, a walkthrough per build step, how to adapt the pattern, FAQ, troubleshooting, glossary | Steps 1–4 written; updated after each step |
+| 03 | [03-tasks.md](03-tasks.md) | The 5 test tasks the dev team is evaluated on | Done |
+| 04 | [04-results.md](04-results.md) | Iterations and pass rate per test task | Stub; filled in at step 9 |
+| 05 | [05-tracing.md](05-tracing.md) | MLflow setup and how to read the traces | Stub; filled in at step 10 (optional) |
 
-## Planned
+`LEARNING.md` keeps a plain, unnumbered name so it can be shared on its own as a standalone guide.
 
-| Doc | Created in | What it'll hold |
-|---|---|---|
-| `results.md` | Step 9 | Iterations and pass rate per test task |
-| `tracing.md` | Step 10 (optional) | MLflow setup and how to read the traces |
-
-When a new doc is added, move its row from **Planned** to **Existing**.
+New docs get the next number and a row here.

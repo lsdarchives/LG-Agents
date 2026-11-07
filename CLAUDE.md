@@ -59,10 +59,12 @@ architect -> test_writer -> coder -> run_checks
 main.py            # CLI entry
 runs/              # per-run folder, per-iteration code + diagnosis logs (gitignored)
 docs/
-  README.md        # index of all docs (existing + planned)
-  LEARNING.md      # learning log, one section per build step + glossary
-  setup.md         # environment setup + how to run each step's check
-  tasks.md         # test tasks
+  README.md        # index of all docs, in reading order
+  01-setup.md      # environment setup + how to run each step's check
+  LEARNING.md      # (02) the guide; plain name so it can be shared standalone
+  03-tasks.md      # test tasks
+  04-results.md    # stub until step 9: iterations + pass rate per task
+  05-tracing.md    # stub until step 10 (optional): MLflow tracing
 devteam/
   state.py
   prompts.py
@@ -99,4 +101,6 @@ Gitignore: .env, runs/, mlruns/, .venv/
   with a full walkthrough (Goal, Concepts, Code, Design notes, Check, Try it, Check yourself,
   Gotchas) and add new concepts/glossary/FAQ entries. It's a sellable guide for other developers:
   self-contained (code inline), no personal notes
-- New docs go in docs/ and get a line in docs/README.md
+- After each build step, also add that step's check to docs/01-setup.md and update the Status
+  column in docs/README.md (fill 04-results.md at step 9, 05-tracing.md at step 10)
+- New docs go in docs/ with the next number prefix (NN-name.md) and get a row in docs/README.md
