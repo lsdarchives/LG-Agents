@@ -4,6 +4,7 @@ Not real isolation - generated code runs with your user's permissions.
 Only run tasks you wrote yourself.
 """
 
+import os
 import re
 import subprocess
 import sys
@@ -12,6 +13,14 @@ from pathlib import Path
 from typing import NamedTuple
 
 TIMEOUT_SECONDS = 30
+
+SUBPROCESS_ENV = {
+    **os.environ,
+    # Don't auto-load third-party pytest plugins (e.g. langsmith's), whose warnings
+    # would clutter the output the debugger reads. Generated tests only need pytest.
+    "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+    "PYTHONUTF8": "1",  # non-ASCII test strings print correctly on Windows
+}
 
 
 class TestResult(NamedTuple):
@@ -32,6 +41,7 @@ def _run(cmd: list[str], cwd: Path) -> tuple[int | None, str]:
             cmd,
             check=False,  # non-zero exit = failing tests/lint, which is normal here
             cwd=cwd,
+            env=SUBPROCESS_ENV,
             capture_output=True,
             text=True,
             encoding="utf-8",

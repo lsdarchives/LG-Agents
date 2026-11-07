@@ -7,7 +7,7 @@ Claude Code loads it automatically. Everything else is here.
 
 | Doc | What it's for |
 |---|---|
-| [LEARNING.md](LEARNING.md) | Learning log: one section per build step (concept, design, Try it, Check yourself) + glossary |
+| [LEARNING.md](LEARNING.md) | The guide, written for other developers: core concepts, architecture, a walkthrough per build step, how to adapt the pattern, FAQ, troubleshooting, glossary |
 | [setup.md](setup.md) | Set up the environment from scratch and run each step's check |
 | [tasks.md](tasks.md) | The 5 test tasks the dev team is evaluated on |
 

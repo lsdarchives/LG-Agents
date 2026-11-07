@@ -92,5 +92,8 @@ Gitignore: .env, runs/, mlruns/, .venv/
 - Print node name + key state fields at each node while developing
 - Keep prompts in prompts.py, not inline
 - Don't add features beyond the current step
-- After each build step, update docs/LEARNING.md (that step's section + glossary) before committing
+- After each build step, update docs/LEARNING.md before committing: replace that step's placeholder
+  with a full walkthrough (Goal, Concepts, Code, Design notes, Check, Try it, Check yourself,
+  Gotchas) and add new concepts/glossary/FAQ entries. It's a sellable guide for other developers:
+  self-contained (code inline), no personal notes
 - New docs go in docs/ and get a line in docs/README.md
