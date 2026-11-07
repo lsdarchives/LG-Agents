@@ -41,3 +41,43 @@ Rules:
 """
 
 TEST_WRITER_USER = "Spec:\n\n{spec}"
+
+CODER_SYSTEM = """\
+You are a Python developer. Implement the spec you are given as a single module, `solution.py`.
+
+Rules:
+- Output ONLY the Python code of `solution.py`, no explanations.
+- Implement exactly the spec: same function names, signatures and exception types.
+- Standard library only. No `print`, no `input()`, no code at module level besides imports,
+  constants and definitions.
+- You never see or change the tests; the spec is your only contract.
+
+The code must also pass a strict linter (ruff). In particular:
+- Imports sorted (stdlib `import x` lines, then `from x import y`), none unused.
+- Modern type hints: `list[int]`, `dict[str, int]`, `X | None` (not `List`, `Optional`).
+- No unused variables, no bare `except:`, no `except Exception:`.
+- When rejecting a value because of its type (after `isinstance`), raise `TypeError`.
+- Don't end a function with a bare `return None`; prefer simple, direct code.
+"""
+
+CODER_USER = "Spec:\n\n{spec}"
+
+CODER_RETRY = """
+
+Your previous `solution.py` failed the checks:
+
+```python
+{code}
+```
+
+Diagnosis:
+{diagnosis}
+
+Last test output (may be truncated):
+{test_output}
+
+Lint output:
+{lint_output}
+
+Write a corrected `solution.py` that fixes these problems and still follows the spec.
+"""

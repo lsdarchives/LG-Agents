@@ -40,7 +40,8 @@ GROQ_API_KEY=...          # optional: fallback provider if Gemini free-tier limi
 | 1 | State imports cleanly | `.venv\Scripts\python -c "from devteam.state import DevState"` |
 | 2 | Good code passes, bad fails, infinite loop times out | Run the **Try it** block in [LEARNING.md](LEARNING.md#step-2-the-test-and-lint-tools) |
 | 3 | Architect writes a spec, test writer writes tests; tests pass against a known-good solution | Run the **Check** block in [LEARNING.md](LEARNING.md#step-3-architect--test-writer-standalone) with `.venv\Scripts\python -X utf8` |
-| 4+ | See the build order in [../CLAUDE.md](../CLAUDE.md) | Commands are added here as each step lands |
+| 4 | Coder's `solution.py` passes the test writer's tests and lints clean | Run the **Check** block in [LEARNING.md](LEARNING.md#step-4-coder-standalone) with `.venv\Scripts\python -X utf8` |
+| 5+ | See the build order in [../CLAUDE.md](../CLAUDE.md) | Commands are added here as each step lands |
 
 Lint the project code itself:
 

@@ -20,7 +20,8 @@ before implementing it, and stop after each step so I can run and check it.
   `devteam/agents.py` so it's easy to change. Check exact model IDs in Google AI Studio.
 - Free tier has per-minute and per-day limits: wrap every LLM call with retry + backoff on
   429 / RESOURCE_EXHAUSTED and 503 / UNAVAILABLE (wait 10s, 20s, 40s, then fail clearly);
-  library retries off (`max_retries=0`) so they don't stack
+  library retries off (`max_retries=0`) so they don't stack. A per-day quota 429 fails at once
+  (free tier can be 20 requests/model/day; waiting seconds won't help)
 - Keep prompts lean (send only current code, tests and last test output, not full history)
 - Fallback provider if limits hit: Groq via `langchain-groq` (`GROQ_API_KEY`); keep the model
   creation in one `get_llm()` function so switching is a one-line change

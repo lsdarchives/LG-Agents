@@ -311,6 +311,11 @@ every time, so retrying them just wastes a minute. And keep **one** retry layer:
 model classes retry on their own by default, so turn that off (`max_retries=0`) when you write
 your own, or the waits multiply.
 
+Not every 429 is the same, either. A **per-minute** limit clears in seconds, so backoff works. A
+**per-day** limit (on Gemini's free tier this can be as low as 20 requests per model per day)
+won't clear for hours, so fail at once and say so. The error text names the quota
+(`...PerDay...`), which tells you which one you hit.
+
 **In the project:** `call_llm()` in `devteam/agents.py` wraps every LLM call (step 3).
 
 ### 1.15 Provider abstraction
@@ -773,6 +778,11 @@ def _should_retry(exc: Exception) -> bool:
     )
 
 
+def _is_daily_quota(exc: Exception) -> bool:
+    """True if the 429 is the per-day free-tier cap: waiting seconds won't help."""
+    return "PerDay" in str(exc) or "per day" in str(exc).lower()
+
+
 def call_llm(system: str, user: str) -> str:
     """Send one system + user message, retrying on 429/503. Returns the reply text."""
     messages = [SystemMessage(system), HumanMessage(user)]
@@ -782,6 +792,12 @@ def call_llm(system: str, user: str) -> str:
         except Exception as exc:
             if not _should_retry(exc):
                 raise
+            if _is_daily_quota(exc):
+                raise RuntimeError(
+                    f"Daily free-tier quota for {MODEL_NAME} is used up; retrying today won't "
+                    "help. Switch MODEL_NAME to another model, use the fallback provider, "
+                    "or wait for the reset."
+                ) from exc
             if attempt == len(RETRY_WAITS):
                 raise RuntimeError(
                     f"Still rate-limited/overloaded after {len(RETRY_WAITS)} retries "
@@ -841,7 +857,8 @@ def test_writer(state: DevState) -> dict:
 - **Backoff you can see.** `call_llm` retries only *temporary* errors (429 quota, 503 overloaded)
   and waits 10s, 20s, then 40s before giving up with a clear message. The library's own retries
   are switched off (`max_retries=0`); otherwise both layers retry and the waits multiply. Anything
-  else (a bad key, a 404 model) fails immediately, because retrying can't fix it.
+  else (a bad key, a 404 model) fails immediately, because retrying can't fix it. So does a
+  *daily* quota 429 (`_is_daily_quota`): it resets in hours, not seconds.
 - **`thinking_level="low"`.** Gemini 3 models "think" before answering, and the default level
   is high. For writing a spec or a test file, low is plenty and is many times faster.
 - **`timeout=120`.** Without a request timeout, a stuck call waits forever. With one, it fails and
@@ -944,11 +961,165 @@ Both outcomes are useful: see Gotchas.
 
 **Goal:** an LLM function that turns a spec into `solution.py`, checked with the step 2 tools.
 
-**Concepts:** [Role boundaries](#116-role-boundaries), [Ground truth](#14-ground-truth).
+**Concepts:** [Role boundaries](#116-role-boundaries), [Ground truth](#14-ground-truth),
+[Context engineering](#113-context-engineering-lean-prompts).
 
-**Check:** the coder's output passes the test writer's tests when run through `run_tests`.
+**Code:** append the coder prompts to `devteam/prompts.py`:
 
-_(Full walkthrough with code coming in the next revision.)_
+````python
+CODER_SYSTEM = """\
+You are a Python developer. Implement the spec you are given as a single module, `solution.py`.
+
+Rules:
+- Output ONLY the Python code of `solution.py`, no explanations.
+- Implement exactly the spec: same function names, signatures and exception types.
+- Standard library only. No `print`, no `input()`, no code at module level besides imports,
+  constants and definitions.
+- You never see or change the tests; the spec is your only contract.
+
+The code must also pass a strict linter (ruff). In particular:
+- Imports sorted (stdlib `import x` lines, then `from x import y`), none unused.
+- Modern type hints: `list[int]`, `dict[str, int]`, `X | None` (not `List`, `Optional`).
+- No unused variables, no bare `except:`, no `except Exception:`.
+- When rejecting a value because of its type (after `isinstance`), raise `TypeError`.
+- Don't end a function with a bare `return None`; prefer simple, direct code.
+"""
+
+CODER_USER = "Spec:\n\n{spec}"
+
+CODER_RETRY = """
+
+Your previous `solution.py` failed the checks:
+
+```python
+{code}
+```
+
+Diagnosis:
+{diagnosis}
+
+Last test output (may be truncated):
+{test_output}
+
+Lint output:
+{lint_output}
+
+Write a corrected `solution.py` that fixes these problems and still follows the spec.
+"""
+````
+
+In `devteam/agents.py`, add one constant under `RETRY_WAITS`:
+
+```python
+MAX_OUTPUT_CHARS = 3000  # keep only the tail of test output in prompts (lean context)
+```
+
+and append the coder node at the end of the file:
+
+```python
+def _tail(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
+    """Last `limit` characters of text; pytest's summary is at the end."""
+    return text if len(text) <= limit else "...(truncated)...\n" + text[-limit:]
+
+
+def coder(state: DevState) -> dict:
+    """spec (+ previous code, diagnosis, check output on retries) -> solution.py source."""
+    iteration = state.get("iteration", 0) + 1
+    is_retry = bool(state.get("code"))
+    print(f"[coder] iteration={iteration} retry={is_retry}")
+
+    user = prompts.CODER_USER.format(spec=state["spec"])
+    if is_retry:
+        user += prompts.CODER_RETRY.format(
+            code=state["code"],
+            diagnosis=state.get("diagnosis") or "(none)",
+            test_output=_tail(state.get("test_output") or "(none)"),
+            lint_output=state.get("lint_output") or "(none)",
+        )
+
+    code = strip_code_fences(call_llm(prompts.CODER_SYSTEM, user))
+    print(f"[coder] solution.py: {len(code.splitlines())} lines\n{_preview(code)}")
+    return {"code": code, "iteration": iteration}
+```
+
+**Design notes**
+- **The coder never sees the tests.** Its only contract is the spec. If it could read the tests,
+  it would be tempted to code *to the tests* (special-casing an expected value) instead of to the
+  behaviour. On a retry it sees the test *output*, which shows what failed but not the whole test file.
+- **Same node, two modes.** If the state has no `code` yet, this is a first attempt: spec only.
+  Otherwise it's a retry: the spec, plus the previous code, the diagnosis, and the test and lint
+  output. That retry input is exactly what step 6's loop will feed back.
+- **Lean retries.** `_tail` keeps only the last 3,000 characters of the test output. That's
+  where pytest puts the failures and the summary line. The full history of earlier attempts is
+  never sent.
+- **The coder owns `iteration`.** Each call is one attempt, so the coder increments the counter.
+  The cap in step 7 reads it.
+- **Lint rules belong in the prompt.** Recent ruff versions enable a large default rule set:
+  sorted imports, modern type hints, simplifications, and even "raise `TypeError` for a failed
+  `isinstance` check". Code that passes every test can still fail on lint. Naming the rules most
+  likely to trip in the prompt lets the coder pass both checks on the first attempt.
+
+**Check:** run the three agents on a task, then check the coder's code with the step 2 tools.
+
+```python
+from devteam.agents import architect, coder, test_writer
+from devteam.tools import run_lint, run_tests
+
+state = {"task": "Merge overlapping intervals"}
+state |= architect(state)
+state |= test_writer(state)
+state |= coder(state)
+
+tests = run_tests(state["code"], state["tests"])
+lint = run_lint(state["code"])
+print("tests:", tests.passed, tests.score, "| lint clean:", lint.clean)
+print(tests.output[-1500:])
+```
+
+Expected: `iteration == 1`, lint clean, and usually every test passing. If a test fails, read the
+failure before you blame the coder (see Gotchas). Try tasks 1–4 from
+[Sample tasks](#sample-tasks). Task 5 is meant to need fix rounds, so leave it for step 6.
+
+**Try it**
+1. **Exercise the retry path by hand.** Plant a bug in a passing solution and give the coder the
+   failure:
+   ```python
+   bad = state["code"].replace("<=", "<", 1)       # e.g. touching intervals no longer merge
+   r, l = run_tests(bad, state["tests"]), run_lint(bad)
+   print(r.score, r.output.splitlines()[-1])
+   retry = {**state, "code": bad, "test_output": r.output, "lint_output": l.output,
+            "diagnosis": "(no debugger yet - read the test output)"}
+   retry |= coder(retry)                            # prints retry=True, iteration=2
+   print(run_tests(retry["code"], state["tests"]).score)
+   ```
+2. Delete the lint rules from `CODER_SYSTEM` and run tasks 1–4 again. How many lint failures?
+3. Let the coder see the tests: add `state["tests"]` to the user message. Does it start
+   special-casing values from the tests?
+
+**Check yourself**
+1. Why doesn't the coder get the test file?
+2. How does `coder` know whether it's a first attempt or a retry?
+3. Why send only the tail of the test output?
+4. All tests pass but `run_lint` says not clean. Is the attempt a success?
+
+<details><summary>Answers</summary>
+
+1. So it implements the spec, not the particular asserts. Tests are a check, not a target.
+2. `state.get("code")` is empty on the first attempt and filled on every later one.
+3. pytest prints failures and the summary at the end. The rest costs tokens and buries the
+   signal.
+4. No. `passed` (step 5) requires tests *and* lint to be clean, so the loop will send it back.
+</details>
+
+**Gotchas**
+- **Failing tests aren't always the coder's fault.** In practice the test writer sometimes invents
+  non-ASCII examples and gets them wrong. For example it asserted `"Ésépé"` is a palindrome, but
+  lowercased it's `ésépé`, which reads `épésé` backwards. The coder's code was correct. When a single test fails, check its
+  expected value by hand first. This is the case the `blame="test"` route (step 8) exists for.
+- **The coder may still add a `print` or an `if __name__ == "__main__":` demo.** It's harmless
+  for the tests, but the prompt asks for no module-level code, to keep the output predictable.
+- **An empty or truncated reply.** If `solution.py` comes back with only a few lines, the request
+  may have hit the free-tier output limit or the timeout. Rerun, or look at the raw reply.
 
 ---
 
@@ -1104,7 +1275,11 @@ you focused prompts and show you *which* part failed.
 
 ### Why Gemini's free tier?
 You can build and experiment for free. The trade-off is rate limits, which is why every call has
-backoff and why prompts stay lean. Because the model is created in one `get_llm()` function,
+backoff and why prompts stay lean. Check the **daily** limit in AI Studio before a long session:
+it can be as low as 20 requests per model per day, and one graph pass is at least 3 calls (plus 2
+per fix round). Each model has its own quota, so switching `MODEL_NAME` gives you a fresh one.
+Note that some model IDs are aliases: the error may name a different model than the one you asked
+for, and those IDs share a quota. Because the model is created in one `get_llm()` function,
 moving to a paid model or another provider is a one-line change.
 
 ### Is the temp-dir sandbox safe?
@@ -1118,6 +1293,7 @@ malicious code. Only run tasks you wrote yourself, or use containers.
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `429` / `RESOURCE_EXHAUSTED` | Free-tier rate limit | Backoff will retry. Wait, or switch to the fallback provider |
+| *"Daily free-tier quota ... is used up"* | Per-day request cap hit (`GenerateRequestsPerDay...`) | Switch `MODEL_NAME` to another model (separate quota), use the fallback provider, or wait for the reset |
 | Model not found | Model ID renamed or retired | Check the current IDs in Google AI Studio and update `MODEL_NAME` |
 | Tests "pass" with 0 tests | Should be impossible here: exit code 5 counts as a failure | Check `run_tests` still compares `returncode == 0` |
 | Every run says `TIMEOUT` | Generated code loops, or a test waits for input | Read `test_output`. The debugger should flag it |
@@ -1128,6 +1304,7 @@ malicious code. Only run tasks you wrote yourself, or use containers.
 | `503 UNAVAILABLE` ("high demand") | Temporary model overload | Backoff retries it. If it keeps happening, switch model |
 | `UnicodeEncodeError` when printing | Windows console isn't UTF-8 | Run `python -X utf8 ...` or set `PYTHONUTF8=1` |
 | Correct code fails a generated test | The test is wrong (LLMs make mistakes too) | Expected now and then. The debugger's `blame="test"` route handles it from step 8 |
+| All tests pass but lint fails (`I001`, `UP006`, `TRY004`, ...) | Recent ruff enables many rules by default | List the commonly tripped rules in `CODER_SYSTEM`. Retries get `lint_output` to fix the rest |
 
 ---
 
@@ -1160,6 +1337,8 @@ Quick definitions. See [Part 1](#part-1-core-concepts) for the full explanations
 | **User message** | The per-run part of a prompt: this task, this spec. |
 | **Spec** | The architect's written contract that both the tests and the code are built from. |
 | **Thinking level** | How much hidden reasoning a Gemini 3 model does before answering. Lower is faster. |
+| **Retry input** | What the coder gets on a later attempt: spec + previous code + diagnosis + the tail of the check output. |
+| **Coding to the tests** | Special-casing expected values instead of implementing the behaviour. This is why the coder never sees the test file. |
 | **Code fence** | The ```` ``` ```` markers models wrap code in. They must be stripped before writing a `.py` file. |
 | **Best-attempt tracking** | Keeping the highest-scoring result in case the run never fully succeeds. |
 | **Checkpointer** | A LangGraph component that saves state between steps (resume, human-in-the-loop). |

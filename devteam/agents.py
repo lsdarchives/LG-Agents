@@ -15,6 +15,7 @@ from devteam.state import DevState
 # Change the model here only. If a model is slow or overloaded, try another Flash model.
 MODEL_NAME = "gemini-3.5-flash"
 RETRY_WAITS = [10, 20, 40]  # seconds to wait after each retryable error
+MAX_OUTPUT_CHARS = 3000  # keep only the tail of test output in prompts (lean context)
 
 
 @lru_cache(maxsize=1)
@@ -38,6 +39,11 @@ def _should_retry(exc: Exception) -> bool:
     )
 
 
+def _is_daily_quota(exc: Exception) -> bool:
+    """True if the 429 is the per-day free-tier cap: waiting seconds won't help."""
+    return "PerDay" in str(exc) or "per day" in str(exc).lower()
+
+
 def call_llm(system: str, user: str) -> str:
     """Send one system + user message, retrying on 429/503. Returns the reply text."""
     messages = [SystemMessage(system), HumanMessage(user)]
@@ -47,6 +53,12 @@ def call_llm(system: str, user: str) -> str:
         except Exception as exc:
             if not _should_retry(exc):
                 raise
+            if _is_daily_quota(exc):
+                raise RuntimeError(
+                    f"Daily free-tier quota for {MODEL_NAME} is used up; retrying today won't "
+                    "help. Switch MODEL_NAME to another model, use the fallback provider, "
+                    "or wait for the reset."
+                ) from exc
             if attempt == len(RETRY_WAITS):
                 raise RuntimeError(
                     f"Still rate-limited/overloaded after {len(RETRY_WAITS)} retries "
@@ -85,3 +97,28 @@ def test_writer(state: DevState) -> dict:
     n_tests = len(re.findall(r"^\s*def test_", tests, re.MULTILINE))
     print(f"[test_writer] {n_tests} test functions, {len(tests.splitlines())} lines")
     return {"tests": tests}
+
+
+def _tail(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
+    """Last `limit` characters of text; pytest's summary is at the end."""
+    return text if len(text) <= limit else "...(truncated)...\n" + text[-limit:]
+
+
+def coder(state: DevState) -> dict:
+    """spec (+ previous code, diagnosis, check output on retries) -> solution.py source."""
+    iteration = state.get("iteration", 0) + 1
+    is_retry = bool(state.get("code"))
+    print(f"[coder] iteration={iteration} retry={is_retry}")
+
+    user = prompts.CODER_USER.format(spec=state["spec"])
+    if is_retry:
+        user += prompts.CODER_RETRY.format(
+            code=state["code"],
+            diagnosis=state.get("diagnosis") or "(none)",
+            test_output=_tail(state.get("test_output") or "(none)"),
+            lint_output=state.get("lint_output") or "(none)",
+        )
+
+    code = strip_code_fences(call_llm(prompts.CODER_SYSTEM, user))
+    print(f"[coder] solution.py: {len(code.splitlines())} lines\n{_preview(code)}")
+    return {"code": code, "iteration": iteration}
