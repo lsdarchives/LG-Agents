@@ -10,7 +10,7 @@ before implementing it, and stop after each step so I can run and check it.
 - Single-file Python tasks only (`solution.py` + `test_solution.py`)
 - CLI only, no frontend: `python main.py "task description"`
 - One LLM model for all agents
-- Python 3.11+, venv, deps in requirements.txt:
+- Python 3.11+ (use 3.14; 3.15 lacks a zstandard wheel), venv, deps in requirements.txt:
   langgraph, langchain-google-genai, pytest, ruff, python-dotenv (mlflow optional, step 10)
 
 ## LLM provider: Google Gemini (free tier)
@@ -54,8 +54,12 @@ architect -> test_writer -> coder -> run_checks
 ## Project layout
 ```
 main.py            # CLI entry
-tasks.md           # test tasks
 runs/              # per-run folder, per-iteration code + diagnosis logs (gitignored)
+docs/
+  README.md        # index of all docs (existing + planned)
+  LEARNING.md      # learning log, one section per build step + glossary
+  setup.md         # environment setup + how to run each step's check
+  tasks.md         # test tasks
 devteam/
   state.py
   prompts.py
@@ -88,3 +92,5 @@ Gitignore: .env, runs/, mlruns/, .venv/
 - Print node name + key state fields at each node while developing
 - Keep prompts in prompts.py, not inline
 - Don't add features beyond the current step
+- After each build step, update docs/LEARNING.md (that step's section + glossary) before committing
+- New docs go in docs/ and get a line in docs/README.md
