@@ -74,6 +74,9 @@ Create `.env` in the project root and **never commit it**:
 GOOGLE_API_KEY=your-key-here
 ```
 
+The line must be exactly `NAME=value`: no spaces around `=`, no quotes. A key pasted on its own
+line is silently ignored, and you'll get *"No API key was provided"* later.
+
 `.gitignore`:
 
 ```
@@ -87,8 +90,9 @@ Project layout you'll end up with:
 
 ```
 main.py            # CLI entry point
-tasks.md           # sample tasks to test the system with
 runs/              # per-run logs (gitignored)
+docs/
+  tasks.md         # sample tasks to test the system with
 devteam/
   __init__.py
   state.py         # the shared state definition
@@ -295,21 +299,28 @@ to send.
 ### 1.14 Rate limits and backoff
 
 **Definition:** free-tier APIs limit requests per minute and per day. When you exceed them they
-return HTTP 429 / `RESOURCE_EXHAUSTED`. **Exponential backoff** means waiting progressively longer
-between retries (10s, 20s, 40s) before giving up with a clear error.
+return HTTP 429 / `RESOURCE_EXHAUSTED`. A busy model can also return 503 `UNAVAILABLE`.
+**Exponential backoff** means waiting progressively longer between retries (10s, 20s, 40s) before
+giving up with a clear error.
 
 **Why it matters:** a multi-agent loop makes many calls quickly. Without backoff, one rate-limit
 error crashes the whole run.
 
-**In the project:** a retry wrapper around every LLM call (step 3).
+Retry only **transient** errors (429, 503). A wrong key (401) or an unknown model (404) will fail
+every time, so retrying them just wastes a minute. And keep **one** retry layer: LangChain's
+model classes retry on their own by default, so turn that off (`max_retries=0`) when you write
+your own, or the waits multiply.
+
+**In the project:** `call_llm()` in `devteam/agents.py` wraps every LLM call (step 3).
 
 ### 1.15 Provider abstraction
 
 **Definition:** creating the model in one place (`get_llm()`) so every agent uses it and switching
 provider or model is a one-line change.
 
-**Why it matters:** models get renamed and deprecated, and free tiers change. You'll switch more
-often than you expect.
+**Why it matters:** models get renamed and deprecated, and free tiers change. On a given day the
+newest model can also be so overloaded that a one-word reply takes 90 seconds, while an older one
+answers in 3. You'll switch more often than you expect.
 
 **In the project:** `MODEL_NAME` and `get_llm()` in `devteam/agents.py`. Gemini is the default,
 and Groq (`langchain-groq`) is the fallback.
