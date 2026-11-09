@@ -1,6 +1,7 @@
 # Results
 
-> **Stub: filled in at step 9 (CLI).** Until then this page only describes what will go here.
+> **Pending evaluation runs.** Run the five sample tasks with the CLI and record their outcomes
+> here. Results are left blank until those runs have actually been completed.
 
 Once `python main.py "<task>"` works, every sample task in [03-tasks.md](03-tasks.md) is run through
 the full graph, and the outcome is recorded here.

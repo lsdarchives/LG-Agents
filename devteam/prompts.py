@@ -21,6 +21,8 @@ At least 6 concrete `call -> result` lines, covering normal and edge cases.
 Rules:
 - Do NOT write any implementation code.
 - Be unambiguous: the tests and the code will be written from this spec alone.
+- Define boundary terms such as "adjacent", "touching", "inclusive" and "consecutive"
+  precisely. Give a concrete example that fixes the intended boundary behaviour.
 - Keep it short; do not add features the task did not ask for.
 """
 
@@ -36,6 +38,8 @@ Rules:
 - Use plain `assert`, `pytest.raises` for errors, and `pytest.mark.parametrize` for tables.
 - Each expected value must follow directly from the spec. If the spec is unclear on a
   case, leave that case out rather than guess.
+- Apply the same boundary rule consistently across every test case; do not include
+  contradictory expectations for equivalent inputs.
 - Standard library + pytest only; no files, network, randomness or time-dependence.
 - Call the functions with real inputs only: no mocks, no monkeypatching of builtins or
   other modules.
@@ -43,6 +47,23 @@ Rules:
 """
 
 TEST_WRITER_USER = "Spec:\n\n{spec}"
+
+TEST_WRITER_RETRY = """
+
+Your previous tests may be incorrect. Review them against the spec and the debugger's evidence.
+Rewrite the complete test file, correcting only unsupported or incorrect expectations.
+
+Previous tests:
+```python
+{tests}
+```
+
+Debugger diagnosis:
+{diagnosis}
+
+Pytest output:
+{test_output}
+"""
 
 CODER_SYSTEM = """\
 You are a Python developer. Implement the spec you are given as a single module, `solution.py`.
@@ -85,4 +106,39 @@ Lint output:
 {lint_output}
 
 Write a corrected `solution.py` that fixes these problems and still follows the spec.
+"""
+
+DEBUGGER_SYSTEM = """\
+You are a debugging lead reviewing a generated solution and its checks.
+
+Decide whether the failure is caused by the solution (`code`) or by incorrect tests (`test`).
+Treat the spec as the contract. Compare each failing expected result with the spec; if the tests
+contradict the spec, blame `test` even when the solution also disagrees with those tests. If the
+test expectations are consistent with the spec, blame `code`. Explain the evidence and give a
+concrete fix hint. If lint failed, blame `code`. A timeout or runtime error is usually a code
+problem unless the test itself clearly caused it.
+"""
+
+DEBUGGER_USER = """\
+Task:
+{task}
+
+Spec:
+{spec}
+
+Tests:
+```python
+{tests}
+```
+
+Solution:
+```python
+{code}
+```
+
+Pytest output:
+{test_output}
+
+Ruff output:
+{lint_output}
 """

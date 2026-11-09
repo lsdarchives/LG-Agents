@@ -3,12 +3,14 @@
 import re
 import time
 from functools import lru_cache
+from typing import Literal
 
 from dotenv import load_dotenv
 from langchain_core.exceptions import ModelRateLimitError
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
+from pydantic import BaseModel, ConfigDict, Field
 
 from devteam import prompts
 from devteam.state import DevState
@@ -22,6 +24,15 @@ MODEL_NAMES = {
 MODEL_NAME = MODEL_NAMES[PROVIDER]
 RETRY_WAITS = [10, 20, 40]  # seconds to wait after each retryable error
 MAX_OUTPUT_CHARS = 3000  # keep only the tail of test output in prompts (lean context)
+
+
+class Diagnosis(BaseModel):
+    """Debugger's structured verdict about a failed check."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    diagnosis: str = Field(description="Evidence-based explanation and concrete fix hint")
+    blame: Literal["code", "test"] = Field(description="Which artifact caused the failure")
 
 
 @lru_cache(maxsize=1)
@@ -58,12 +69,19 @@ def _is_daily_quota(exc: Exception) -> bool:
     return "PerDay" in str(exc) or "per day" in str(exc).lower()
 
 
-def call_llm(system: str, user: str) -> str:
-    """Send one system + user message, retrying on 429/503. Returns the reply text."""
-    messages = [SystemMessage(system), HumanMessage(user)]
+def _invoke_with_retry(messages: list, *, structured: bool = False):
+    """Invoke the configured model, retrying transient rate-limit and overload errors."""
+    llm = get_llm()
+    if structured:
+        if PROVIDER == "groq":
+            # GPT-OSS supports Groq JSON Schema output; avoid tool-calling mode, which
+            # can return a function call name the API did not register as a tool.
+            llm = llm.with_structured_output(Diagnosis, method="json_schema", strict=True)
+        else:
+            llm = llm.with_structured_output(Diagnosis, method="json_schema")
     for attempt in range(len(RETRY_WAITS) + 1):
         try:
-            return get_llm().invoke(messages).text
+            return llm.invoke(messages)
         except Exception as exc:
             if not _should_retry(exc):
                 raise
@@ -82,6 +100,18 @@ def call_llm(system: str, user: str) -> str:
             print(f"  [retry] {type(exc).__name__}: waiting {wait}s ({attempt + 1}/{len(RETRY_WAITS)})")
             time.sleep(wait)
     raise AssertionError("unreachable")
+
+
+def call_llm(system: str, user: str) -> str:
+    """Send one system + user message, retrying on 429/503. Returns the reply text."""
+    messages = [SystemMessage(system), HumanMessage(user)]
+    return _invoke_with_retry(messages).text
+
+
+def call_llm_structured(system: str, user: str) -> Diagnosis:
+    """Call the model for a validated debugger verdict."""
+    messages = [SystemMessage(system), HumanMessage(user)]
+    return _invoke_with_retry(messages, structured=True)
 
 
 def strip_code_fences(text: str) -> str:
@@ -106,7 +136,14 @@ def architect(state: DevState) -> dict:
 def test_writer(state: DevState) -> dict:
     """spec -> test_solution.py source."""
     print("[test_writer] writing tests from spec")
-    reply = call_llm(prompts.TEST_WRITER_SYSTEM, prompts.TEST_WRITER_USER.format(spec=state["spec"]))
+    user = prompts.TEST_WRITER_USER.format(spec=state["spec"])
+    if state.get("blame") == "test" and not state.get("test_fix_used", False):
+        user += prompts.TEST_WRITER_RETRY.format(
+            tests=state["tests"],
+            diagnosis=state.get("diagnosis") or "(none)",
+            test_output=_tail(state.get("test_output") or "(none)"),
+        )
+    reply = call_llm(prompts.TEST_WRITER_SYSTEM, user)
     tests = strip_code_fences(reply)
     n_tests = len(re.findall(r"^\s*def test_", tests, re.MULTILINE))
     print(f"[test_writer] {n_tests} test functions, {len(tests.splitlines())} lines")
@@ -136,3 +173,19 @@ def coder(state: DevState) -> dict:
     code = strip_code_fences(call_llm(prompts.CODER_SYSTEM, user))
     print(f"[coder] solution.py: {len(code.splitlines())} lines\n{_preview(code)}")
     return {"code": code, "iteration": iteration}
+
+
+def debugger(state: DevState) -> dict:
+    """Review failed checks and return a diagnosis plus code/test blame."""
+    print("[debugger] reviewing failed checks")
+    user = prompts.DEBUGGER_USER.format(
+        task=state["task"],
+        spec=state["spec"],
+        tests=state["tests"],
+        code=state["code"],
+        test_output=_tail(state.get("test_output") or "(none)"),
+        lint_output=state.get("lint_output") or "(none)",
+    )
+    result = call_llm_structured(prompts.DEBUGGER_SYSTEM, user)
+    print(f"[debugger] blame={result.blame}: {result.diagnosis}")
+    return {"diagnosis": result.diagnosis, "blame": result.blame}

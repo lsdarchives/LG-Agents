@@ -41,7 +41,12 @@ GOOGLE_API_KEY=...        # optional: Gemini fallback, from Google AI Studio
 | 2 | Good code passes, bad fails, infinite loop times out | Run the **Try it** block in [LEARNING.md](LEARNING.md#step-2-the-test-and-lint-tools) |
 | 3 | Architect writes a spec, test writer writes tests; tests pass against a known-good solution | Run the **Check** block in [LEARNING.md](LEARNING.md#step-3-architect--test-writer-standalone) with `.venv\Scripts\python -X utf8` |
 | 4 | Coder's `solution.py` passes the test writer's tests and lints clean | Run the **Check** block in [LEARNING.md](LEARNING.md#step-4-coder-standalone) with `.venv\Scripts\python -X utf8` |
-| 5+ | See the build order in [../CLAUDE.md](../CLAUDE.md) | Commands are added here as each step lands |
+| 5 | Compile the linear graph | `.venv\Scripts\python -c "from devteam.graph import graph; print(sorted(graph.get_graph().nodes))"` (full LLM pass requires `.env`; invoke with a complete initial state) |
+| 6 | Failed checks reach debugger and retry | Run a hard task such as the CSV parser from [03-tasks.md](03-tasks.md); inspect the node prints for `run_checks → debugger → coder → run_checks`. Requires `.env`. |
+| 7 | Capped run retains best candidate and logs iterations | Temporarily set `MAX_ITERATIONS = 1`, run a task that fails its first check, then inspect final `status`, `best_score`, and `runs/<run_id>/iteration-01/` (solution, tests, diagnosis, pytest, ruff). Restore the cap to 5. Requires `.env`. |
+| 8 | Test-blame route is limited to one rewrite | Run the route-guard command in [LEARNING.md](LEARNING.md#step-8-test-blame-route); a full test rewrite requires `.env`. |
+| 9 | CLI runs a task and saves the selected solution | `.venv\Scripts\python main.py "Write a function that merges overlapping intervals"` (requires `.env`; see [LEARNING.md](LEARNING.md#step-9-cli)) |
+| 10 | CLI records MLflow traces and task metrics | Install optional MLflow, run `.venv\Scripts\python main.py --trace "Write a function that merges overlapping intervals"`, then open the UI with `.venv\Scripts\mlflow ui`. See [05-tracing.md](05-tracing.md). |
 
 Lint the project code itself:
 

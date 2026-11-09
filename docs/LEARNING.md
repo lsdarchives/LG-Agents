@@ -501,6 +501,7 @@ class DevState(TypedDict):
     # Best attempt tracking
     best_code: str  # code with the highest score so far
     best_score: int  # number of passed tests for best_code
+    run_id: str  # local runs/ directory for this invocation
 
     # Outcome
     status: Literal["running", "success", "max_iterations"]
@@ -522,6 +523,7 @@ Also create an empty `devteam/__init__.py`.
   | Debugger verdict | `diagnosis`, `blame` | debugger |
   | Loop control | `iteration`, `test_fix_used` | coder, debugger route |
   | Best attempt | `best_code`, `best_score` | run_checks |
+  | Run logs | `run_id` | run_checks |
   | Outcome | `status` | the end of the graph |
 
 - **Loop-control fields exist *because* graphs can loop.** Plan for termination from the
@@ -1181,7 +1183,75 @@ failure before you blame the coder (see Gotchas). Try tasks 1–4 from
 
 **Check:** one full pass from task to test results, with each node printing its name and key fields.
 
-_(Full walkthrough with code coming in the next revision.)_
+#### Build the graph
+
+Create `devteam/graph.py`. It adapts the existing standalone functions to LangGraph without
+changing their role: each node receives the shared state and returns only its updates.
+
+```python
+from langgraph.graph import END, START, StateGraph
+
+from devteam.agents import architect, coder, test_writer
+from devteam.state import DevState
+from devteam.tools import run_lint, run_tests
+
+def run_checks(state: DevState) -> dict:
+    tests = run_tests(state["code"], state["tests"])
+    lint = run_lint(state["code"])
+    return {
+        "test_output": tests.output,
+        "lint_output": lint.output,
+        "passed": tests.passed and lint.clean,
+    }
+
+builder = StateGraph(DevState)
+builder.add_node("architect", architect)
+builder.add_node("test_writer", test_writer)
+builder.add_node("coder", coder)
+builder.add_node("run_checks", run_checks)
+builder.add_edge(START, "architect")
+builder.add_edge("architect", "test_writer")
+builder.add_edge("test_writer", "coder")
+builder.add_edge("coder", "run_checks")
+builder.add_edge("run_checks", END)
+graph = builder.compile()
+```
+
+In this repo, `build_graph()` contains the builder code and compiles it; the module-level `graph`
+is the ready-to-use compiled graph. `run_checks` combines the test and lint results: both must be
+clean for `passed` to be true. It also prints a compact summary, while retaining the full tool
+outputs in state for the next step's debugger.
+
+**Design notes**
+- Each node name in the graph is also the label shown in LangGraph traces.
+- `run_checks` is ordinary Python. It does not ask the model whether generated code works.
+- This section shows the initial linear graph from step 5; step 6 below adds its retry route.
+- An invocation must provide every `DevState` field because the current `TypedDict` fields are
+  all required. The CLI and state initializer arrive in step 9.
+
+**Check**
+
+Compile and inspect the graph without making API calls:
+
+```powershell
+.venv\Scripts\python -c "from devteam.graph import graph; print(sorted(graph.get_graph().nodes))"
+```
+
+For the full pass, provide a complete initial `DevState` and a valid provider key in `.env`, then
+call `graph.invoke(initial_state)`. Confirm the printed node sequence is architect, test_writer,
+coder, run_checks, and inspect `test_output`, `lint_output`, and `passed` in the returned state.
+
+**Try it:** compile the graph, then run it on one short function task. In the step 5 version,
+a failing check still ends the graph; step 6 adds retries.
+
+**Check yourself:** why does `run_checks` return `passed` only when both the test and lint tools
+report success?
+
+**Gotchas**
+- A graph can compile without contacting the model. `invoke` starts the actual API calls.
+- In the step 5 version, `passed=False` does not route anywhere; the step 6 version adds routing.
+- The graph state must include initial values for artifacts such as `spec`, `tests`, and `code`;
+  a small initializer will make that convenient when the CLI is added.
 
 ---
 
@@ -1194,7 +1264,60 @@ _(Full walkthrough with code coming in the next revision.)_
 
 **Check:** a hard task (the CSV parser) goes round the loop at least once.
 
-_(Full walkthrough with code coming in the next revision.)_
+#### Get a structured diagnosis
+
+Add a Pydantic model and a debugger prompt. Structured output makes `blame` a validated choice,
+so the graph doesn't have to interpret free-form prose to pick a route:
+
+```python
+class Diagnosis(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    diagnosis: str
+    blame: Literal["code", "test"]
+```
+
+The debugger receives the task, spec, tests, solution, and the latest pytest and ruff output.
+`call_llm_structured` uses the same retry policy as ordinary model calls. Groq uses
+`get_llm().with_structured_output(Diagnosis, method="json_schema", strict=True)`; Gemini uses
+its JSON Schema output mode. The node returns only `diagnosis` and `blame`.
+
+#### Add the cycle
+
+The checks node now routes success to `END` and failure to the debugger. The debugger routes to
+the coder, which produces a new solution and increments `iteration`; checks then run again.
+
+```python
+builder.add_conditional_edges(
+    "run_checks",
+    lambda state: "done" if state["passed"] else "debugger",
+    {"done": END, "debugger": "debugger"},
+)
+builder.add_edge("debugger", "coder")
+```
+
+At this step, the blame field is recorded for analysis, but both blame values go back to the
+coder. Step 8 will add the one-time test rewrite route.
+
+**Check**
+
+Run the CSV parser task from [03-tasks.md](03-tasks.md) with a valid provider key. A run that
+fails its first checks should print `debugger`, then another `coder` and `run_checks` pass. A task
+that passes immediately ends after the first checks.
+
+**Try it:** inspect `diagnosis` and `blame` in the final state after a retry. Compare the diagnosis
+with pytest and ruff output to see whether the model used concrete evidence.
+
+**Check yourself:** which state field determines whether `run_checks` ends or enters the loop?
+
+**Gotchas**
+- This step has no project-level attempt cap yet. LangGraph's recursion limit can stop a stubborn
+  loop with `GraphRecursionError`; step 7 adds a deliberate cap and a useful final result.
+- A structured schema validates the shape and allowed blame value, not whether the diagnosis is
+  correct. Always compare it with the actual check output.
+- The spec is the contract. When a test expectation conflicts with the spec, the debugger should
+  blame the test so the one-time rewrite route can repair it.
+- Repeated calls consume model quota: every failed round adds a debugger call and a coder call.
 
 ---
 
@@ -1207,7 +1330,62 @@ _(Full walkthrough with code coming in the next revision.)_
 
 **Check:** with the cap set to 1, the run stops with `status="max_iterations"` and returns `best_code`.
 
-_(Full walkthrough with code coming in the next revision.)_
+#### Keep the strongest result and stop at a cap
+
+Set the maximum coder attempts near the top of `devteam/graph.py`:
+
+```python
+MAX_ITERATIONS = 5
+```
+
+After each test run, `run_checks` parses the passed-test count already returned by `run_tests`.
+It updates `best_code` only when the candidate has a higher score (or when no candidate has been
+saved yet). A passing candidate ends with `status="success"`; a failing candidate at the cap ends
+with `status="max_iterations"` and puts `best_code` in the final `code` field. A failing
+candidate below the cap stays `running` and routes to the debugger.
+
+The score counts passed tests, even if lint fails. Passing the workflow still requires both the
+tests and lint to be clean. This lets the system retain a promising candidate without treating it
+as a successful result.
+
+#### Save per-iteration logs
+
+Each run gets a short unique `run_id`. The checker creates one directory per iteration under the
+gitignored `runs/` directory:
+
+```text
+runs/<run_id>/iteration-01/solution.py
+runs/<run_id>/iteration-01/test_solution.py
+runs/<run_id>/iteration-01/diagnosis.txt
+runs/<run_id>/iteration-01/pytest.txt
+runs/<run_id>/iteration-01/ruff.txt
+```
+
+The first diagnosis file says no diagnosis is available yet. Later iterations capture the
+previous debugger's diagnosis alongside the exact test file, new code, and current check output.
+This makes it possible to review what the checker actually ran and how the coder responded
+without putting generated artifacts in the source tree.
+
+**Check**
+
+Run a task that needs fixes and confirm it stops with either `success` or `max_iterations` after
+no more than five coder attempts. Inspect `best_code`, `best_score`, and the matching folders under
+`runs/<run_id>/`. To exercise the cap quickly, temporarily set `MAX_ITERATIONS = 1`; restore it to
+5 afterward. A first attempt that passes will correctly stop as `success` instead.
+
+**Try it:** compare the final `code` with the last `solution.py` log. At the cap, the final code
+should be the highest-scoring candidate; each iteration directory preserves what was actually
+checked at that point.
+
+**Check yourself:** why can `best_score` reach the full test count while the run still ends with
+`status="max_iterations"`?
+
+**Gotchas**
+- The score measures passing tests only; ruff cleanliness is still required for success.
+- Ties preserve the earlier candidate. This avoids replacing an equally scoring solution without
+  evidence it is better.
+- `runs/` is local and gitignored. Keep it if you want to inspect a run; it is not a durable
+  database and can be deleted when no longer useful.
 
 ---
 
@@ -1220,7 +1398,52 @@ _(Full walkthrough with code coming in the next revision.)_
 
 **Check:** a deliberately wrong test is rerouted to the test writer exactly once.
 
-_(Full walkthrough with code coming in the next revision.)_
+#### Route test failures once
+
+The debugger already writes `blame` to state. Add a conditional edge after it: when the verdict is
+`test` and `test_fix_used` is false, run a wrapper around the test writer; otherwise go to the
+coder.
+
+```python
+def route_after_debugger(state: DevState) -> str:
+    if state.get("blame") == "test" and not state.get("test_fix_used", False):
+        return "rewrite_tests"
+    return "coder"
+
+def rewrite_tests(state: DevState) -> dict:
+    return {**test_writer(state), "test_fix_used": True}
+```
+
+The wrapper marks the rewrite as used in the same state update that replaces the tests. The
+test-writer node gets the debugger diagnosis and previous pytest output as extra context on this
+route, so it can correct the mistaken expectation against the spec. On later rounds, even if the
+debugger blames the tests again, `test_fix_used=True` sends the graph to the coder.
+
+**Check**
+
+Check the route guard without making model calls:
+
+```powershell
+.venv\Scripts\python -c "from devteam.graph import route_after_debugger; assert route_after_debugger({'blame': 'test', 'test_fix_used': False}) == 'rewrite_tests'; assert route_after_debugger({'blame': 'test', 'test_fix_used': True}) == 'coder'; assert route_after_debugger({'blame': 'code', 'test_fix_used': False}) == 'coder'; print('test-blame routing OK')"
+```
+
+For an end-to-end run, exercise a task with a known-wrong test expectation and inspect the node
+prints: `rewrite_tests` should appear once at most, and the returned `test_fix_used` should be true
+after that route.
+
+**Try it:** inspect the saved pytest output and debugger diagnosis that led to a rewrite. Confirm
+the revised tests still follow the architect's spec.
+
+**Check yourself:** what prevents a sequence of test-blame verdicts from sending the graph back to
+the test writer indefinitely?
+
+**Gotchas**
+- The test writer can only repair a test by following the spec. If the spec is ambiguous, a test
+  rewrite may not resolve the disagreement.
+- `test_fix_used` is set after the test writer returns. If the model call fails, the graph stops
+  with an error rather than silently marking a rewrite that did not happen.
+- A debugger can misclassify a code bug as a test bug. The one-time limit bounds the damage; check
+  the diagnosis against the actual failure output.
 
 ---
 
@@ -1230,7 +1453,72 @@ _(Full walkthrough with code coming in the next revision.)_
 
 **Check:** run all 5 sample tasks and record iterations and pass rate for each.
 
-_(Full walkthrough with code coming in the next revision.)_
+#### Build the initial state
+
+The graph expects state fields for artifacts that do not exist yet, so add `initial_state(task)`
+to `devteam/state.py`. It sets empty strings for generated text, false for result flags, zero for
+the iteration and score, and `status="running"`. `run_id` starts empty; the first check creates
+it and stores it in state.
+
+```python
+def initial_state(task: str) -> DevState:
+    return {
+        "task": task,
+        "spec": "", "tests": "", "code": "",
+        "test_output": "", "lint_output": "", "passed": False,
+        "diagnosis": "", "blame": None,
+        "iteration": 0, "test_fix_used": False,
+        "best_code": "", "best_score": 0,
+        "best_test_output": "", "best_lint_output": "",
+        "run_id": "", "status": "running",
+    }
+```
+
+#### Run and report a task
+
+`main.py` accepts one quoted task description, invokes the compiled graph, saves the selected
+solution at the root of its run folder, and prints the status, attempt count, score, rewrite flag,
+log folder, and check output.
+
+```powershell
+.venv\Scripts\python main.py "Write a function that merges overlapping intervals"
+```
+
+The core of `main.py` parses one positional task and invokes the graph with that initialized state:
+
+```python
+parser = argparse.ArgumentParser(description="Generate and check a Python solution.")
+parser.add_argument("task", help="Python task description, preferably in quotes")
+args = parser.parse_args()
+result = graph.invoke(initial_state(args.task))
+```
+
+The actual CLI also handles interrupts and provider/runtime errors, writes the final code to
+`runs/<run_id>/solution.py`, and returns a nonzero process code unless the status is success.
+
+The output folder contains both the final `solution.py` and the iteration logs. The process exits
+with code 0 for `success`, code 1 for a failed run or `max_iterations`, and code 130 if interrupted.
+API/model errors are printed to stderr with exit code 1.
+
+**Check**
+
+Run each task in [03-tasks.md](03-tasks.md) from the repo root, with a valid provider key in
+`.env`. For each run, record the status, `iteration`, and `best_score` in [04-results.md](04-results.md).
+Check that `runs/<run_id>/solution.py` exists and that each iteration has its own solution, test,
+diagnosis, pytest, and ruff files.
+
+**Try it:** run a simple task first, then the CSV parser. The simpler task should provide a quick
+end-to-end check; the parser exercises retries and the one-time test rewrite route if needed.
+
+**Check yourself:** where is the final selected solution saved, and what exit code signals a run
+that reached the attempt cap?
+
+**Gotchas**
+- Quote the task so PowerShell passes it as one argument. Without quotes, argparse sees multiple
+  positional arguments and exits with usage text.
+- The CLI does not print the whole generated solution; open the reported `solution.py` path.
+- A task can return `max_iterations` with a useful best candidate. The CLI saves that candidate
+  but exits with code 1 so scripts can tell it did not fully pass.
 
 ---
 
@@ -1238,9 +1526,59 @@ _(Full walkthrough with code coming in the next revision.)_
 
 **Goal:** see every node, prompt and response for every run in a UI, and compare runs.
 
-**Check:** `mlflow ui` shows a trace per run, plus per-task metrics (`status`, `iteration`, `best_score`).
+**Concepts:** [LLM node vs tool node](#13-llm-node-vs-tool-node), [trace vs run](05-tracing.md).
 
-_(Full walkthrough with code coming in the next revision.)_
+#### Enable tracing only when requested
+
+MLflow is optional. The CLI recognizes `--trace`; that path imports MLflow, selects an experiment,
+enables LangChain/LangGraph autotracing, and starts an MLflow run around the graph invocation:
+
+```python
+mlflow.set_experiment("devteam")
+mlflow.langchain.autolog()
+
+with mlflow.start_run(run_name="devteam"):
+    result = graph.invoke(initial_state(task))
+    mlflow.log_param("status", result["status"])
+    mlflow.log_metric("iterations", result["iteration"])
+    mlflow.log_metric("best_score", result["best_score"])
+```
+
+The actual CLI also logs the task, DevTeam run ID, test-rewrite flag, and success metric. With no
+`--trace` flag, MLflow is not imported and the normal CLI has no extra dependency.
+
+Install the optional package and run one traced task:
+
+```powershell
+.venv\Scripts\python -m pip install mlflow
+.venv\Scripts\python main.py --trace "Write a function that merges overlapping intervals"
+```
+
+Start the UI from a second terminal at the repository root:
+
+```powershell
+.venv\Scripts\mlflow ui --backend-store-uri ./mlruns
+```
+
+Open `http://127.0.0.1:5000`, choose the `devteam` experiment, then compare metrics in **Runs**
+and inspect the detailed graph execution in **Traces**. See [05-tracing.md](05-tracing.md) for
+setup and troubleshooting details.
+
+**Check:** the `devteam` experiment contains a trace and a run for the invocation; the run has
+`status`, `iterations`, and `best_score` recorded.
+
+**Try it:** run a task once with tracing and once without it. Confirm the usual CLI output and
+saved solution are still present in both cases.
+
+**Check yourself:** where do `best_score` and the node-by-node execution appear in the MLflow UI?
+
+**Gotchas**
+- MLflow is installed separately; a traced run reports a clear error if you request `--trace`
+  without installing it.
+- A trace is different from an MLflow run. The run holds task parameters and summary metrics; the
+  trace holds the nested execution details.
+- Trace data includes prompts, model replies, state values, and generated code. Local data lives
+  in the gitignored `mlruns/` directory.
 
 ---
 
@@ -1378,6 +1716,11 @@ Quick definitions. See [Part 1](#part-1-core-concepts) for the full explanations
 | **Tool node** | A graph node that runs ordinary code (no LLM), like `run_checks`. |
 | **Ground truth** | An objective correctness signal, such as test results. |
 | **State** | The shared dict all nodes read and update. Ours is `DevState`. |
+| **Initial state** | The starting values supplied to the graph; `initial_state(task)` creates them for the CLI. |
+| **CLI** | Command-line interface; here, `main.py` accepts a task description and runs the graph. |
+| **Exit code** | The process result: 0 means success, while nonzero reports failure or interruption. |
+| **MLflow run** | One tracked CLI invocation with task parameters and summary metrics. |
+| **Trace** | The nested record of what the graph, nodes, and model calls did during a task. |
 | **Node** | A function `state -> partial update`. |
 | **Edge** | A fixed "after A, run B" connection. |
 | **Conditional edge** | An edge whose target is chosen at runtime by a routing function. |
