@@ -48,6 +48,14 @@ GOOGLE_API_KEY=...        # optional: Gemini fallback, from Google AI Studio
 | 9 | CLI runs a task and saves the selected solution | `.venv\Scripts\python main.py "Write a function that merges overlapping intervals"` (requires `.env`; see [LEARNING.md](LEARNING.md#step-9-cli)) |
 | 10 | CLI records MLflow traces and task metrics | Install optional MLflow, run `.venv\Scripts\python main.py --trace "Write a function that merges overlapping intervals"`, then open the UI with `.venv\Scripts\mlflow ui`. See [05-tracing.md](05-tracing.md). |
 
+### v2 checks
+
+See [06-v2-guide.md](06-v2-guide.md) for each step's walkthrough.
+
+| Step | Check | Command / how |
+|---|---|---|
+| 11 | agents.yaml validates; three agents reply with a valid result block | `.venv\Scripts\python -m devteam.registry` (no API calls), then `.venv\Scripts\python -X utf8 -m devteam.builder` (requires `.env`; expect `step 11 check: PASS`) |
+
 Lint the project code itself:
 
 ```powershell

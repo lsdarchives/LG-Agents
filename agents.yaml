@@ -29,7 +29,8 @@ shared_rules: |
   - Prefer the simplest design that meets the acceptance criteria. No speculative features.
   - Every claim about code must be backed by something you viewed or ran.
   - Finish with the exact output format requested. Keep prose short.
-  Every response ends with a JSON block:
+  Every response ends with this result block, as the LAST thing in your reply, ALWAYS, even when
+  your role asks for its own JSON (diagnosis, review, findings): give that first, then this block:
   {"status": "done" | "blocked" | "failed", "summary": "...", "questions": [], "handoff_notes": []}
 
 agents:

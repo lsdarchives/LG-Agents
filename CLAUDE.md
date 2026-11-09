@@ -1,5 +1,9 @@
 # DevTeam — LangGraph multi-agent coding loop
 
+> **v1 (below) is finished.** v2, an autonomous team of agents defined in `agents.yaml`, has its spec,
+> build order (steps 11+) and conventions in [CLAUDE_v2.md](CLAUDE_v2.md); follow it for all new work.
+> The v2 guide is docs/06-v2-guide.md (updated after each v2 step, like LEARNING.md for v1).
+
 ## Goal
 A LangGraph multi-agent "dev team" that takes a small Python task, writes tests,
 writes code, runs the tests for real, and loops on failures until they pass or a cap is hit.
