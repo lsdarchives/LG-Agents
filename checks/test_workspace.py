@@ -89,3 +89,13 @@ def test_langchain_tools_return_errors_as_text(ws):
     assert reply.startswith("ERROR:") and "outside the workspace" in reply
     bad_args = tools[0].invoke({"path": "x.txt"})
     assert bad_args.startswith("ERROR: invalid arguments")
+
+
+def test_json_artifacts_validated_and_unwrapped(ws):
+    import json
+
+    escaped = json.dumps('[{"id": "T1"}]')  # JSON string containing JSON (one level too deep)
+    ws.write_artifact("tasks.json", escaped)
+    assert json.loads(ws.read_artifact("tasks.json")) == [{"id": "T1"}]
+    with pytest.raises(ToolError, match="not valid JSON"):
+        ws.write_artifact("tasks.json", "[{id: T1}]")

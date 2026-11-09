@@ -5,6 +5,7 @@ Design (agent-computer interface): small outputs, line numbers, clear errors ret
 """
 
 import ast
+import json
 import re
 from pathlib import Path
 
@@ -157,11 +158,28 @@ class Workspace:
             name += ".md"
         return self.root / ARTIFACT_DIR / name
 
+    @staticmethod
+    def _check_json(content: str) -> str:
+        """JSON artifacts must parse. Content that is a JSON *string* holding JSON (escaped one level
+        too deep, e.g. literal \\n everywhere) is unwrapped; anything else invalid is rejected."""
+        try:
+            value = json.loads(content)
+            if isinstance(value, str):
+                value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ToolError(
+                f"rejected: not valid JSON (line {exc.lineno} col {exc.colno}: {exc.msg}); "
+                "send the raw JSON document, not an escaped string"
+            ) from exc
+        return json.dumps(value, indent=2, ensure_ascii=False) + "\n"
+
     def write_artifact(self, name: str, content: str) -> str:
         """Save a team document (e.g. 'prd', 'design', 'tasks.json'). Overwrites the previous version."""
         if not content.strip():
             raise ToolError("artifact content is empty")
         path = self._artifact_path(name)
+        if path.suffix == ".json":
+            content = self._check_json(content)
         path.write_text(content, encoding="utf-8", newline="\n")
         return f"Saved artifact {path.name} ({len(content.splitlines())} lines)."
 

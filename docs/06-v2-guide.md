@@ -74,6 +74,25 @@ This is the ReAct pattern (reason, act, observe), capped at a fixed number of ro
 Every path from an agent is resolved to an absolute path and must stay under the run's workspace
 folder. Resolving first matters: `a/../../b.txt` looks relative but points outside.
 
+### Reducers for team state
+In v1 each field had one writer, so overwriting was fine. In a team, several agents touch the same
+fields (the task board, the artifact index), sometimes in the same step. A reducer is the merge rule
+LangGraph applies when a node returns a value for that field: merge by id, union of keys, or a sum.
+
+### Checkpointer
+A checkpointer saves the full graph state after every node, keyed by a thread id. Give the run id as
+the thread id and any run can be inspected (`get_state`) or resumed (`invoke(None, config)`) after a
+crash, a Ctrl+C, or a pause for human approval.
+
+### Event log
+A run's public record: one validated JSON event per line (who was activated, which tools they called,
+what they wrote, how it ended). It is written for observers (the office view, dashboards, you)
+and is separate from the checkpoint, which belongs to the engine.
+
+### Output contract
+An agent's word that it is "done" is not evidence. The builder checks the outputs an agent is
+supposed to leave behind (its `writes`) and refuses "done" when they don't exist.
+
 ## Build it, step by step
 
 Steps are numbered after v1's 1–10.
@@ -1078,7 +1097,575 @@ artifacts are printed, then `phase 1 check: PASS`. The files stay in `workspace/
 ---
 
 ### Step 13: Artifacts, TeamState and a SQLite checkpointer
-_Written when the step is built._
+
+**Goal:** give the team a shared memory that survives crashes, and a record of everything it does.
+Agents get their `reads` from state plus the workspace's artifacts, every activation is logged as
+events (which the office view will replay), and a run can be killed and resumed by its id.
+
+**Concepts:** [reducers for team state](#reducers-for-team-state), [checkpointer](#checkpointer),
+[event log](#event-log), [output contract](#output-contract).
+
+**Check:** kill a run after its 2nd agent, resume it, and it finishes without rerunning finished
+agents; every line of its `events.jsonl` validates.
+
+#### Limits and paths
+
+`devteam/config.py` gains where runs live and the run-wide caps later steps enforce:
+
+```python
+# Where each run lives: project files in workspace/<run_id>/, logs + events in runs/<run_id>/.
+WORKSPACE_ROOT = REPO_ROOT / "workspace"
+RUNS_ROOT = REPO_ROOT / "runs"
+CHECKPOINT_DB = RUNS_ROOT / "checkpoints.sqlite"  # SQLite checkpointer: resume a run by its id
+
+# Hard limits (autonomous routing can loop forever without them).
+RECURSION_LIMIT = 200  # LangGraph super-steps per invoke
+MAX_ACTIVATIONS = 60  # agent activations per run
+MAX_FIX_LOOPS = 4  # debugger -> fix -> qa rounds per task
+MAX_REVIEW_ROUNDS = 2
+MAX_BLOCKED_CYCLES = 3  # blocked -> answer cycles per run
+MAX_PARALLEL_BUILDERS = 2  # free-tier rate limits
+```
+
+#### TeamState with reducers
+
+Create `devteam/team_state.py` (v1 owns `state.py`). Fields that several nodes write get a reducer.
+
+```python
+"""v2 shared state. Reducers let several nodes contribute to the same field safely.
+
+(Named team_state.py because v1 owns devteam/state.py.)
+"""
+
+import operator
+from typing import Annotated, Literal, TypedDict
+
+from langgraph.graph.message import add_messages
+
+
+class Task(TypedDict, total=False):
+    id: str
+    title: str
+    owner_role: str
+    component: str
+    stack: str
+    files: list[str]
+    depends_on: list[str]
+    acceptance: list[str]
+    status: Literal["todo", "in_progress", "done", "failed"]
+
+
+def merge_dicts(old: dict[str, str] | None, new: dict[str, str] | None) -> dict[str, str]:
+    """Reducer: later keys win; nothing is ever dropped."""
+    return {**(old or {}), **(new or {})}
+
+
+def merge_tasks(old: list[Task] | None, new: list[Task] | None) -> list[Task]:
+    """Reducer: merge tasks by id. An update for an existing id changes only the fields it sends;
+    new ids are appended in order. Two parallel builders can each update their own task."""
+    merged: dict[str, Task] = {t["id"]: dict(t) for t in (old or [])}
+    for task in new or []:
+        merged[task["id"]] = {**merged.get(task["id"], {}), **task}
+    return list(merged.values())
+
+
+class TeamState(TypedDict):
+    request: str
+    run_id: str
+    messages: Annotated[list, add_messages]  # audit log of agent results (not shared context)
+    artifacts: Annotated[dict[str, str], merge_dicts]  # artifact name -> path in the workspace
+    task_board: Annotated[list[Task], merge_tasks]
+    current_task: str | None
+    last_result: dict  # last agent's result block + its name
+    activations: Annotated[int, operator.add]  # each node returns 1; the reducer sums
+    review_rounds: int
+    status: Literal["running", "done", "partial", "failed"]
+    reason: str
+
+
+def initial_team_state(request: str, run_id: str) -> TeamState:
+    return {
+        "request": request,
+        "run_id": run_id,
+        "messages": [],
+        "artifacts": {},
+        "task_board": [],
+        "current_task": None,
+        "last_result": {},
+        "activations": 0,
+        "review_rounds": 0,
+        "status": "running",
+        "reason": "",
+    }
+```
+
+- `merge_tasks` merges by id, so a builder can send `{"id": "T2", "status": "done"}` without
+  resending the whole board, and two parallel builders can update different tasks in one step.
+- `activations` uses `operator.add`: each node returns `1` and LangGraph sums them.
+- `messages` (`add_messages`) is an audit log of results. It is never sent to agents as context.
+
+#### The event log
+
+Create `devteam/events.py`. Each event type is a Pydantic model, combined into a discriminated union
+on `type`, so an unknown type or a bad field fails when it is written, not when the office
+tries to draw it.
+
+```python
+"""Event log: what happened in a run, as one JSON object per line in runs/<id>/events.jsonl.
+
+The office view replays this file (and receives the same events live through LangGraph's custom
+stream). The engine only writes events; it never reads them back or depends on a viewer.
+"""
+
+import json
+import time
+from pathlib import Path
+from typing import Annotated, Literal
+
+from langgraph.config import get_stream_writer
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+
+
+class _Event(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    t: float  # seconds since the run started (replay timeline)
+    ts: float  # wall-clock epoch seconds
+
+
+class Activate(_Event):
+    type: Literal["activate"] = "activate"
+    agent: str
+    objective: str
+    reads: list[str] = []
+
+
+class Handoff(_Event):
+    type: Literal["handoff"] = "handoff"
+    from_: str = Field(alias="from")
+    to: str
+    objective: str
+
+
+class ToolCall(_Event):
+    type: Literal["tool_call"] = "tool_call"
+    agent: str
+    tool: str
+    arg: str = ""  # short summary of the arguments
+
+
+class ArtifactWritten(_Event):
+    type: Literal["artifact_written"] = "artifact_written"
+    agent: str
+    name: str
+
+
+class Tests(_Event):
+    type: Literal["tests"] = "tests"
+    agent: str
+    passed: int
+    failed: int
+
+
+class Blocked(_Event):
+    type: Literal["blocked"] = "blocked"
+    agent: str
+    questions: list[str]
+
+
+class Result(_Event):
+    type: Literal["result"] = "result"
+    agent: str
+    status: Literal["done", "blocked", "failed"]
+    summary: str
+    steps: int = 0
+    tokens: int = 0
+
+
+class Finish(_Event):
+    type: Literal["finish"] = "finish"
+    status: str
+    reason: str = ""
+
+
+Event = Annotated[
+    Activate | Handoff | ToolCall | ArtifactWritten | Tests | Blocked | Result | Finish,
+    Field(discriminator="type"),
+]
+EVENT_ADAPTER = TypeAdapter(Event)
+
+
+def _stream(payload: dict) -> None:
+    """Also send the event to LangGraph's custom stream when running inside a graph."""
+    try:
+        writer = get_stream_writer()
+    except RuntimeError:  # called outside a graph run: there is no stream, which is fine
+        return
+    writer({"event": payload})
+
+
+class EventLog:
+    """Append-only, validated event writer for one run. Safe to reopen when a run resumes."""
+
+    def __init__(self, path: Path | str):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.start = time.time()
+        if self.path.exists():  # resumed run: keep one continuous timeline
+            first = self.path.read_text(encoding="utf-8").splitlines()[:1]
+            if first:
+                self.start = json.loads(first[0])["ts"]
+
+    def emit(self, type: str, **fields) -> dict:
+        now = time.time()
+        event = EVENT_ADAPTER.validate_python({"type": type, "t": round(now - self.start, 3), "ts": now, **fields})
+        payload = event.model_dump(by_alias=True)
+        with self.path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        _stream(payload)
+        return payload
+
+
+def read_events(path: Path | str) -> list[dict]:
+    """Load and validate every event in a file (raises on the first invalid line)."""
+    events = []
+    for n, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
+        if line.strip():
+            try:
+                events.append(EVENT_ADAPTER.validate_json(line).model_dump(by_alias=True))
+            except ValueError as exc:
+                raise ValueError(f"{path}:{n}: invalid event: {exc}") from exc
+    return events
+```
+
+`t` is seconds since the run started. A resumed run reopens the file and keeps the first event's
+start time, so a replay plays as one continuous run.
+
+#### From state to an agent's reads
+
+Create `devteam/artifacts.py`. `load_inputs` builds exactly an agent's `reads`: some are computed
+from state (`request`, `task_board`, `budget`, ...), the rest are artifact files. `sync_state`
+reports what the workspace holds after an agent ran.
+
+```python
+"""Bridge between TeamState, the workspace's artifacts and an agent's `reads`.
+
+Agents communicate only through artifacts (structured documents in workspace/.devteam/). Before an
+activation, load_inputs() gathers exactly the agent's `reads`; afterwards sync_state() reports what
+the workspace now holds so the graph state stays in step.
+"""
+
+import json
+import shutil
+from functools import cache
+
+import yaml
+
+from devteam.config import MAX_ACTIVATIONS, STACKS_FILE
+from devteam.team_state import TeamState
+from devteam.toolbox import ToolError, Workspace
+
+# A `reads`/`writes` name whose artifact file is named differently.
+ALIASES = {"task_board": "tasks.json"}
+
+
+def artifact_index(ws: Workspace) -> str:
+    """One line per artifact: name, size and its first heading, so the Tech Lead can see progress."""
+    lines = []
+    for name, rel in ws.artifacts().items():
+        text = (ws.root / rel).read_text(encoding="utf-8")
+        first = next((ln.strip("# ").strip() for ln in text.splitlines() if ln.strip()), "")
+        lines.append(f"- {name} ({rel.rsplit('/', 1)[-1]}, {len(text.splitlines())} lines): {first[:80]}")
+    return "\n".join(lines) or "(no artifacts yet)"
+
+
+@cache
+def stack_catalog() -> str:
+    """Stack profiles the architect may pick from: name, language, kind and use_when.
+
+    Non-Python stacks run in Docker; without Docker only Python profiles are offered."""
+    data = yaml.safe_load(STACKS_FILE.read_text(encoding="utf-8"))
+    docker = shutil.which("docker") is not None
+    stacks = [s for s in data["stacks"] if docker or s.get("language") == "python"]
+    lines = [f"- {s['name']} ({s.get('language')}, {s.get('kind')}): {s.get('use_when', '')}" for s in stacks]
+    note = "" if docker else "\n(Only Python stacks are available: Docker is not installed.)"
+    return f"default: {data.get('default_stack')}\n" + "\n".join(lines) + note
+
+
+def _read(ws: Workspace, name: str) -> str | None:
+    try:
+        return ws.read_artifact(ALIASES.get(name, name))
+    except ToolError:
+        return None
+
+
+def load_inputs(reads: list[str], state: TeamState, ws: Workspace, extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Return {read_name: text} for an agent's `reads`. Unknown/missing reads are left out, and the
+    builder shows them as "(not provided)". `extra` (e.g. the Tech Lead's handoff) wins over files."""
+    computed = {
+        "request": state["request"],
+        "task_board": json.dumps(state["task_board"], indent=1) if state["task_board"] else None,
+        "artifact_index": artifact_index(ws),
+        "last_agent_result": json.dumps(state["last_result"]) if state["last_result"] else None,
+        "budget": f"activations used: {state['activations']} of {MAX_ACTIVATIONS}",
+        "stack_catalog": stack_catalog() if "stack_catalog" in reads else None,
+    }
+    inputs: dict[str, str] = {}
+    for name in reads:
+        value = (extra or {}).get(name) or computed.get(name) or _read(ws, name)
+        if value:
+            inputs[name] = value
+    return inputs
+
+
+def sync_state(ws: Workspace) -> dict:
+    """State update reflecting the workspace: the artifact index, and the task board if tasks.json parses."""
+    update: dict = {"artifacts": ws.artifacts()}
+    raw = _read(ws, "task_board")
+    if raw:
+        try:
+            tasks = json.loads(raw)
+        except json.JSONDecodeError:
+            tasks = None
+        if isinstance(tasks, list) and all(isinstance(t, dict) and "id" in t for t in tasks):
+            update["task_board"] = tasks
+    return update
+```
+
+#### JSON artifacts must parse
+
+`write_artifact` validates `.json` artifacts the same way `edit_file` validates Python:
+
+```python
+@staticmethod
+def _check_json(content: str) -> str:
+    """JSON artifacts must parse. Content that is a JSON *string* holding JSON (escaped one level
+    too deep, e.g. literal \\n everywhere) is unwrapped; anything else invalid is rejected."""
+    try:
+        value = json.loads(content)
+        if isinstance(value, str):
+            value = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ToolError(
+            f"rejected: not valid JSON (line {exc.lineno} col {exc.colno}: {exc.msg}); "
+            "send the raw JSON document, not an escaped string"
+        ) from exc
+    return json.dumps(value, indent=2, ensure_ascii=False) + "\n"
+```
+
+#### The output contract
+
+The builder now refuses to accept "done" for work that doesn't exist. After an agent with
+`write_artifact` reports done, every artifact in its `writes` must be in the workspace. If one is
+missing, the agent gets one nudge with two extra tool rounds; if it's still missing, the result is
+downgraded to `failed`.
+
+```python
+        def missing_outputs() -> list[str]:
+            """Output contract: an agent with write_artifact must leave every `writes` artifact behind."""
+            if "write_artifact" not in by_name:
+                return []
+            have = workspace.artifacts()
+            return [w for w in spec.writes if ALIASES.get(w, w).split(".")[0] not in have]
+
+        result, raw = final_result(tool_loop(ask(model, set(by_name))))
+        if result.status == "done" and (absent := missing_outputs()):
+            print(f"  [{spec.name}] reported done but did not write {absent}; asking it to write them")
+            messages.append(HumanMessage(OUTPUTS_NOTE.format(missing=", ".join(absent))))
+            limit = steps + 2  # a small extra budget just for writing the missing outputs
+            result, raw = final_result(tool_loop(ask(model, set(by_name))))
+            if result.status == "done" and (absent := missing_outputs()):
+                result = AgentResult(status="failed", summary=f"Claimed done but never wrote {absent}.")
+```
+
+The builder also emits `activate`, `tool_call`, `artifact_written`, `blocked` and `result` events, and
+counts tokens from each reply's `usage_metadata`.
+
+#### A resumable pipeline
+
+Create `devteam/team_graph.py` (v1 owns `graph.py`). For now the order is fixed: product_manager,
+architect, project_manager, finish. Step 14 replaces the fixed edges with the Tech Lead.
+
+```python
+"""v2 team graph with a SQLite checkpointer, so any run can be resumed by its id.
+
+Step 13 wires a FIXED planning pipeline (product_manager -> architect -> project_manager); step 14
+replaces the fixed edges with the Tech Lead supervisor. (Named team_graph.py: v1 owns graph.py.)
+
+    python -m devteam.team_graph "build a ..."          # new run
+    python -m devteam.team_graph --resume <run_id>      # continue a killed/crashed run
+"""
+
+import argparse
+import sqlite3
+import sys
+import uuid
+from datetime import datetime
+
+from langchain_core.messages import AIMessage
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.graph import END, START, StateGraph
+
+from devteam.artifacts import load_inputs, sync_state
+from devteam.builder import build_agent
+from devteam.config import CHECKPOINT_DB, RECURSION_LIMIT, RUNS_ROOT, WORKSPACE_ROOT
+from devteam.events import EventLog
+from devteam.registry import load_registry
+from devteam.team_state import TeamState, initial_team_state
+from devteam.toolbox import Workspace
+
+PIPELINE = ["product_manager", "architect", "project_manager"]
+
+
+def new_run_id() -> str:
+    return f"{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:4]}"
+
+
+def workspace_for(run_id: str) -> Workspace:
+    return Workspace(WORKSPACE_ROOT / run_id)
+
+
+def events_for(run_id: str) -> EventLog:
+    return EventLog(RUNS_ROOT / run_id / "events.jsonl")
+
+
+def agent_node(name: str):
+    """A graph node that runs one registry agent on the current state."""
+    registry = load_registry()
+    spec = registry.get(name)
+    run_agent = build_agent(spec, registry.shared_rules)
+
+    def node(state: TeamState) -> dict:
+        ws = workspace_for(state["run_id"])
+        out = run_agent(load_inputs(spec.reads, state, ws), ws, events_for(state["run_id"]))
+        result = out["result"].model_dump()
+        return {
+            **sync_state(ws),
+            "last_result": {"agent": name, **result},
+            "activations": 1,
+            "messages": [AIMessage(content=f"{result['status']}: {result['summary']}", name=name)],
+        }
+
+    node.__name__ = name
+    return node
+
+
+def finish(state: TeamState) -> dict:
+    status = "done" if state["task_board"] else "partial"
+    reason = f"{len(state['task_board'])} tasks planned" if state["task_board"] else "no task board produced"
+    events_for(state["run_id"]).emit("finish", status=status, reason=reason)
+    print(f"[finish] status={status} reason={reason}")
+    return {"status": status, "reason": reason}
+
+
+def build_pipeline(checkpointer=None):
+    builder = StateGraph(TeamState)
+    previous = START
+    for name in PIPELINE:
+        builder.add_node(name, agent_node(name))
+        builder.add_edge(previous, name)
+        previous = name
+    builder.add_node("finish", finish)
+    builder.add_edge(previous, "finish")
+    builder.add_edge("finish", END)
+    return builder.compile(checkpointer=checkpointer)
+
+
+def open_checkpointer() -> SqliteSaver:
+    CHECKPOINT_DB.parent.mkdir(parents=True, exist_ok=True)
+    return SqliteSaver(sqlite3.connect(CHECKPOINT_DB, check_same_thread=False))
+
+
+def run_config(run_id: str) -> dict:
+    return {"configurable": {"thread_id": run_id}, "recursion_limit": RECURSION_LIMIT}
+
+
+def start(request: str, run_id: str | None = None) -> dict:
+    run_id = run_id or new_run_id()
+    print(f"[run] id={run_id} workspace={WORKSPACE_ROOT / run_id}")
+    graph = build_pipeline(open_checkpointer())
+    return graph.invoke(initial_team_state(request, run_id), run_config(run_id))
+
+
+def resume(run_id: str) -> dict:
+    """Continue a run from its last checkpoint (the node that was running when it died reruns)."""
+    graph = build_pipeline(open_checkpointer())
+    config = run_config(run_id)
+    snapshot = graph.get_state(config)
+    if not snapshot.values:
+        raise SystemExit(f"no checkpoint for run {run_id!r}")
+    if not snapshot.next:
+        print(f"[resume] run {run_id} already finished (status={snapshot.values['status']})")
+        return snapshot.values
+    print(f"[resume] run {run_id}: continuing at {list(snapshot.next)}")
+    return graph.invoke(None, config)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Run (or resume) the v2 planning pipeline.")
+    parser.add_argument("request", nargs="?", help="what to build")
+    parser.add_argument("--run-id", help="id for a new run (default: timestamp)")
+    parser.add_argument("--resume", metavar="RUN_ID", help="continue a run from its last checkpoint")
+    args = parser.parse_args()
+    if args.resume:
+        state = resume(args.resume)
+    elif args.request:
+        state = start(args.request, args.run_id)
+    else:
+        parser.error("give a request or --resume RUN_ID")
+    print(f"[run] status={state['status']} activations={state['activations']} "
+          f"artifacts={sorted(state['artifacts'])} tasks={len(state['task_board'])}")
+    return 0 if state["status"] == "done" else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+**Design notes**
+- **The thread id is the run id.** The checkpointer saves state after every node under
+  `thread_id`. `graph.invoke(None, config)` continues from the last saved node; whichever node was
+  running when the process died runs again from the start.
+- **`check_same_thread=False`** lets the SQLite connection be used from LangGraph's worker threads.
+- **The event log is separate from the checkpoint.** The checkpoint is the engine's private state;
+  events are a public, append-only record that anything (the office, a dashboard, you) can read.
+- **Computed reads.** `stack_catalog` is built from `stacks.yaml`. Without Docker it lists only
+  Python profiles, so the architect can't pick a stack that can't run here.
+
+**Check**
+
+```powershell
+.venv\Scripts\python -m pytest checks -q
+.venv\Scripts\python -X utf8 -m checks.phase02
+```
+
+Expected: the run is killed after two agents (`killed=True`), resume continues at
+`project_manager`, every agent ran exactly once, the task board is printed, then
+`phase 2 check: PASS`. The events are in `runs/<run_id>/events.jsonl`.
+
+**Try it**
+- Start a run, press Ctrl+C during the architect, then run
+  `python -m devteam.team_graph --resume <run_id>` and watch it pick up at the architect.
+- Open `runs/<run_id>/events.jsonl` and follow one agent from `activate` to `result`.
+
+**Check yourself**
+1. Why can't `activations` be a plain `int` field if two nodes might run in the same step?
+2. Why does a resumed run rerun the node that was interrupted, rather than continuing inside it?
+3. What does the output contract catch that the result block alone can't?
+
+**Gotchas**
+- **"Blocked" is often correct.** On the first run the architect returned `blocked` because nothing
+  supplied its `stack_catalog`. That's the ask-don't-guess rule working; the fix was to provide the
+  read, not to change the prompt.
+- **Claimed but not done.** The architect once replied "Created design.md" without calling
+  `write_artifact`; that's what the output contract now catches.
+- **JSON escaped one level too deep.** The project manager sent `tasks.json` with literal `\n`
+  sequences. The validator unwraps that case and rejects anything else with the parser's error;
+  the agent fixed it on the next try.
+- **Killing a run to test resume is a race.** If the next agent is quick, the run can finish before
+  the kill. The check polls every 0.1s and kills as soon as the second `result` event appears.
+
+---
 
 ### Step 14: Tech Lead supervisor (handoff → Command)
 _Written when the step is built._
@@ -1133,6 +1720,11 @@ A shell can do anything, including delete things outside the project, and its ou
 unbounded. Purpose-built tools refuse what they shouldn't do, explain why, and return just enough
 output. Commands that must run (tests, installs) get their own allow-listed tools in later steps.
 
+**Why keep an event log when the checkpointer already saves state?**
+The checkpoint holds the latest state, overwritten step by step and shaped for the engine. The event
+log holds the whole history in a small public format, so a viewer can replay a run second by second
+without importing any engine code.
+
 ## Glossary
 
 - **Registry:** the validated list of agent specs loaded from `agents.yaml`.
@@ -1147,3 +1739,8 @@ output. Commands that must run (tests, installs) get their own allow-listed tool
 - **Artifact:** a team document (PRD, design, task board, reports) saved in the workspace's `.devteam/` folder.
 - **Tool budget (`max_steps`):** the maximum rounds of tool calls in one agent activation.
 - **Phantom tool call:** a model's final answer wrapped as a call to a tool that doesn't exist.
+- **TeamState:** the v2 graph state shared by every node, with reducers on multi-writer fields.
+- **Checkpoint:** a saved copy of the graph state after a node; the basis of resume and human approval.
+- **Thread id:** the key a checkpointer stores a run under; in DevTeam it's the run id.
+- **Event:** one line of a run's events.jsonl (activate, handoff, tool_call, artifact_written, tests, blocked, result, finish).
+- **Output contract:** the rule that an agent's `writes` must exist before its "done" is accepted.

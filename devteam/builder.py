@@ -12,6 +12,8 @@ from typing import Literal
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel, ValidationError
 
+from devteam.artifacts import ALIASES
+from devteam.events import EventLog
 from devteam.llm import get_llm, invoke_messages
 from devteam.registry import AgentSpec, load_registry
 from devteam.toolbox import Workspace, make_tools
@@ -20,6 +22,10 @@ MISSING = "(not provided)"
 BUDGET_NOTE = (
     "Your tool budget for this activation is used up. Do not call any more tools. "
     "Reply now with your final answer, ending with the result block."
+)
+OUTPUTS_NOTE = (
+    "You reported done, but these outputs were never saved: {missing}. Nothing exists until a tool "
+    "call saves it. Call write_artifact for each one now, then reply with the result block."
 )
 REPAIR_NOTE = (
     "Your reply did not end with a valid result block. Reply again with only the result block: "
@@ -91,65 +97,106 @@ def _short(args: dict, limit: int = 80) -> str:
     return line if len(line) <= limit else line[: limit - 3] + "..."
 
 
-def build_agent(spec: AgentSpec, shared_rules: str) -> Callable[[dict[str, str], Workspace], dict]:
-    """Return agent(inputs, workspace) -> {"result", "raw", "steps", "tool_calls"}."""
+def build_agent(spec: AgentSpec, shared_rules: str) -> Callable[..., dict]:
+    """Return agent(inputs, workspace, events=None, objective=None)
+    -> {"result", "raw", "steps", "tool_calls", "tokens"}."""
     if spec.kind == "tool":
         raise NotImplementedError(f"{spec.name!r} is a tool node; tool nodes are built in later steps")
     system = system_prompt(spec, shared_rules)
 
-    def agent(inputs: dict[str, str], workspace: Workspace) -> dict:
+    def agent(
+        inputs: dict[str, str],
+        workspace: Workspace,
+        events: EventLog | None = None,
+        objective: str | None = None,
+    ) -> dict:
         tools, missing = make_tools(workspace, spec.tools)
         by_name = {t.name: t for t in tools}
         plain = get_llm(spec.model_tier)
         model = plain.bind_tools(tools) if tools else plain
+        emit = events.emit if events else (lambda *a, **k: None)
         print(f"[{spec.name}] tier={spec.model_tier} reads={spec.reads} tools={list(by_name)}"
               + (f" (not built yet: {missing})" if missing else ""))
+        emit("activate", agent=spec.name, objective=objective or spec.description, reads=list(inputs))
 
         messages = [SystemMessage(system), HumanMessage(render_inputs(spec, inputs))]
         tool_calls: list[dict] = []
         steps = 0
-        reply = invoke_messages(model, messages, spec.model_tier, set(by_name))
-        messages.append(reply)
-        while reply.tool_calls:
-            if steps >= spec.max_steps:
-                for call in reply.tool_calls:  # every tool call needs an answer before the next turn
-                    messages.append(ToolMessage("ERROR: tool budget used up", tool_call_id=call["id"]))
-                messages.append(HumanMessage(BUDGET_NOTE))
-                reply = invoke_messages(plain, messages, spec.model_tier)
-                messages.append(reply)
-                break
-            steps += 1
-            for call in reply.tool_calls:
-                tool = by_name.get(call["name"])
-                if tool is None:
-                    out = ToolMessage(
-                        f"ERROR: unknown tool {call['name']!r}; you have {list(by_name)}",
-                        tool_call_id=call["id"],
-                    )
-                else:
-                    out = tool.invoke(call)  # returns a ToolMessage; errors come back as "ERROR: ..."
-                tool_calls.append({"tool": call["name"], "args": call["args"]})
-                first = str(out.content).splitlines()[0] if out.content else ""
-                print(f"  [{spec.name}] {call['name']}({_short(call['args'])}) -> {first[:90]}")
-                messages.append(out)
-            reply = invoke_messages(model, messages, spec.model_tier, set(by_name))
-            messages.append(reply)
+        tokens = 0
 
-        raw = reply.text
-        try:
-            result = parse_result(raw)
-        except AgentOutputError:
-            messages.append(HumanMessage(REPAIR_NOTE))  # one repair attempt, then give up
-            raw = invoke_messages(plain, messages, spec.model_tier).text
-            result = parse_result(raw)
-        print(f"[{spec.name}] status={result.status} steps={steps} summary={result.summary[:100]!r}")
-        return {"result": result, "raw": raw, "steps": steps, "tool_calls": tool_calls}
+        def ask(chat_model, names: set[str] | None = None):
+            nonlocal tokens
+            reply = invoke_messages(chat_model, messages, spec.model_tier, names)
+            tokens += (getattr(reply, "usage_metadata", None) or {}).get("total_tokens", 0)
+            messages.append(reply)
+            return reply
+
+        limit = spec.max_steps
+
+        def tool_loop(reply):
+            """Run tool rounds until the model answers without tools or the budget is used up."""
+            nonlocal steps
+            while reply.tool_calls:
+                if steps >= limit:
+                    for call in reply.tool_calls:  # every tool call needs an answer before the next turn
+                        messages.append(ToolMessage("ERROR: tool budget used up", tool_call_id=call["id"]))
+                    messages.append(HumanMessage(BUDGET_NOTE))
+                    return ask(plain)
+                steps += 1
+                for call in reply.tool_calls:
+                    tool = by_name.get(call["name"])
+                    if tool is None:
+                        out = ToolMessage(
+                            f"ERROR: unknown tool {call['name']!r}; you have {list(by_name)}",
+                            tool_call_id=call["id"],
+                        )
+                    else:
+                        out = tool.invoke(call)  # returns a ToolMessage; errors come back as "ERROR: ..."
+                    tool_calls.append({"tool": call["name"], "args": call["args"]})
+                    first = str(out.content).splitlines()[0] if out.content else ""
+                    print(f"  [{spec.name}] {call['name']}({_short(call['args'])}) -> {first[:90]}")
+                    emit("tool_call", agent=spec.name, tool=call["name"], arg=_short(call["args"], 60))
+                    if call["name"] == "write_artifact" and first.startswith("Saved artifact"):
+                        emit("artifact_written", agent=spec.name, name=str(call["args"].get("name", "")))
+                    messages.append(out)
+                reply = ask(model, set(by_name))
+            return reply
+
+        def final_result(reply) -> tuple[AgentResult, str]:
+            try:
+                return parse_result(reply.text), reply.text
+            except AgentOutputError:
+                messages.append(HumanMessage(REPAIR_NOTE))  # one repair attempt, then give up
+                raw = ask(plain).text
+                return parse_result(raw), raw
+
+        def missing_outputs() -> list[str]:
+            """Output contract: an agent with write_artifact must leave every `writes` artifact behind."""
+            if "write_artifact" not in by_name:
+                return []
+            have = workspace.artifacts()
+            return [w for w in spec.writes if ALIASES.get(w, w).split(".")[0] not in have]
+
+        result, raw = final_result(tool_loop(ask(model, set(by_name))))
+        if result.status == "done" and (absent := missing_outputs()):
+            print(f"  [{spec.name}] reported done but did not write {absent}; asking it to write them")
+            messages.append(HumanMessage(OUTPUTS_NOTE.format(missing=", ".join(absent))))
+            limit = steps + 2  # a small extra budget just for writing the missing outputs
+            result, raw = final_result(tool_loop(ask(model, set(by_name))))
+            if result.status == "done" and (absent := missing_outputs()):
+                result = AgentResult(status="failed", summary=f"Claimed done but never wrote {absent}.")
+        print(f"[{spec.name}] status={result.status} steps={steps} tokens={tokens} "
+              f"summary={result.summary[:100]!r}")
+        if result.status == "blocked":
+            emit("blocked", agent=spec.name, questions=result.questions)
+        emit("result", agent=spec.name, status=result.status, summary=result.summary, steps=steps, tokens=tokens)
+        return {"result": result, "raw": raw, "steps": steps, "tool_calls": tool_calls, "tokens": tokens}
 
     agent.__name__ = spec.name
     return agent
 
 
-def get_agent(name: str) -> Callable[[dict[str, str], Workspace], dict]:
+def get_agent(name: str) -> Callable[..., dict]:
     """Convenience: look up `name` in agents.yaml and build it."""
     registry = load_registry()
     return build_agent(registry.get(name), registry.shared_rules)

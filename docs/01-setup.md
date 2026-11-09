@@ -56,6 +56,7 @@ See [06-v2-guide.md](06-v2-guide.md) for each step's walkthrough.
 |---|---|---|
 | 11 | agents.yaml validates; three agents reply with a valid result block | `.venv\Scripts\python -m devteam.registry` (no API calls), then `.venv\Scripts\python -X utf8 -m checks.step11` (requires `.env`; expect `step 11 check: PASS`) |
 | 12 | Workspace tools refuse escapes and bad edits; agents write artifacts with tools | `.venv\Scripts\python -m pytest checks -q` (no API calls), then `.venv\Scripts\python -X utf8 -m checks.phase01` (requires `.env`; expect `phase 1 check: PASS`; artifacts in `workspace/check-phase01/.devteam/`) |
+| 13 | Team state, resumable runs, valid event log | `.venv\Scripts\python -m pytest checks -q`, then `.venv\Scripts\python -X utf8 -m checks.phase02` (requires `.env`; kills the run after 2 agents, resumes it; expect `phase 2 check: PASS`; events in `runs/<run_id>/events.jsonl`). Resume any run with `.venv\Scripts\python -m devteam.team_graph --resume <run_id>` |
 
 Lint the project code itself:
 

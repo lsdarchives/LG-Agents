@@ -5,4 +5,5 @@ ruff
 python-dotenv
 langchain-groq
 pyyaml
+langgraph-checkpoint-sqlite
 # Optional: install for step 10 tracing with `python -m pip install mlflow`.
