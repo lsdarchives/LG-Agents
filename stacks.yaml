@@ -1,0 +1,879 @@
+# stacks.yaml — stack profiles the team can build with
+#
+# The architect picks one profile per component (e.g. api: python-fastapi, web: react-vite-ts).
+# qa_runner, devops, run_command and the builders read commands and conventions from here,
+# so supporting a new language = adding a profile, not changing agent code.
+#
+# Every non-Python stack runs inside Docker (see CLAUDE_v2.md "Sandbox"), because installing
+# npm/go/cargo packages runs third-party code.
+#
+# Fields
+#   language, kind      for the architect's choice
+#   use_when            one line the architect reads when choosing
+#   docker_image        image the sandbox runs commands in
+#   scaffold            files every project of this stack must have
+#   install / test / lint / format / build / run / smoke   shell commands (run in the component dir)
+#   test_framework      what test_engineer writes tests in
+#   conventions         injected into builder + reviewer prompts for components of this stack
+
+default_stack: python-fastapi
+
+stacks:
+
+  - name: python-fastapi
+    language: python
+    kind: backend
+    use_when: "REST APIs, business logic, SQLite/Postgres apps; the default for most backends"
+    docker_image: python:3.13-slim
+    scaffold: [pyproject.toml or requirements.txt, app/main.py, tests/]
+    install: pip install -r requirements.txt
+    test: pytest -q --tb=short
+    lint: ruff check .
+    format: ruff format --check .
+    build: ""
+    run: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    smoke: python -c "from fastapi.testclient import TestClient; from app.main import app; assert TestClient(app).get('/health').status_code == 200"
+    test_framework: pytest + FastAPI TestClient
+    conventions: |
+      Type hints everywhere; pydantic models for request/response; routes -> services -> repositories;
+      parameterised SQL; no bare except; config from environment variables.
+
+  - name: python-data-ml
+    language: python
+    kind: data
+    use_when: "data pipelines, analysis, charts, classic ML models, LLM/RAG features"
+    docker_image: python:3.13-slim
+    scaffold: [requirements.txt, src/, tests/, data/]
+    install: pip install -r requirements.txt
+    test: pytest -q --tb=short
+    lint: ruff check .
+    format: ruff format --check .
+    build: ""
+    run: python -m src.main
+    smoke: python -c "import src"
+    test_framework: pytest
+    conventions: |
+      Pure functions per pipeline stage; seeded randomness; pandas/scikit-learn Pipelines;
+      no notebooks; outputs written to an output/ folder; FakeLLM for any LLM calls in tests.
+
+  - name: python-streamlit
+    language: python
+    kind: frontend
+    use_when: "quick internal dashboards and data UIs on top of Python logic"
+    docker_image: python:3.13-slim
+    scaffold: [requirements.txt, app.py, tests/]
+    install: pip install -r requirements.txt
+    test: pytest -q --tb=short
+    lint: ruff check .
+    format: ruff format --check .
+    build: ""
+    run: streamlit run app.py --server.headless true
+    smoke: python -c "import ast; ast.parse(open('app.py').read())"
+    test_framework: pytest (test the logic modules; keep app.py thin)
+    conventions: |
+      Keep app.py as layout only; all logic in importable modules that are unit-tested;
+      cache expensive calls; show loading and error states.
+
+  - name: node-express-ts
+    language: typescript
+    kind: backend
+    use_when: "APIs where the team or ecosystem is JavaScript/TypeScript"
+    docker_image: node:22-slim
+    scaffold: [package.json, tsconfig.json, src/index.ts, tests/]
+    install: npm ci || npm install
+    test: npx vitest run
+    lint: npx eslint .
+    format: npx prettier --check .
+    build: npx tsc --noEmit
+    run: npx tsx src/index.ts
+    smoke: npx tsc --noEmit
+    test_framework: vitest + supertest
+    conventions: |
+      strict TypeScript (no any); zod for request validation; async/await with centralised error
+      middleware; routes -> services -> repositories; parameterised queries; env config.
+
+  - name: react-vite-ts
+    language: typescript
+    kind: frontend
+    use_when: "interactive web frontends and SPAs that call an API"
+    docker_image: node:22-slim
+    scaffold: [package.json, tsconfig.json, vite.config.ts, index.html, src/main.tsx, src/App.tsx]
+    install: npm ci || npm install
+    test: npx vitest run
+    lint: npx eslint .
+    format: npx prettier --check .
+    build: npm run build
+    run: npx vite --host 0.0.0.0 --port 5173
+    smoke: npm run build
+    test_framework: vitest + @testing-library/react (jsdom)
+    conventions: |
+      Function components and hooks; strict TypeScript; one API client module with typed responses;
+      loading/empty/error states for every data view; accessible forms (labels, keyboard);
+      never use dangerouslySetInnerHTML with user data; API base URL from import.meta.env.
+
+  - name: nextjs-ts
+    language: typescript
+    kind: fullstack
+    use_when: "full-stack web apps with server-rendered pages and API routes in one project"
+    docker_image: node:22-slim
+    scaffold: [package.json, tsconfig.json, next.config.mjs, app/page.tsx, tests/]
+    install: npm ci || npm install
+    test: npx vitest run
+    lint: npx next lint
+    format: npx prettier --check .
+    build: npm run build
+    run: npx next start -p 3000
+    smoke: npm run build
+    test_framework: vitest + @testing-library/react
+    conventions: |
+      App Router; server components by default, client components only when interactive;
+      validate route-handler input with zod; no secrets in client code (only NEXT_PUBLIC_ is exposed).
+
+  - name: go-api
+    language: go
+    kind: backend
+    use_when: "small, fast services or CLIs where a single static binary is useful"
+    docker_image: golang:1.25
+    scaffold: [go.mod, cmd/server/main.go, internal/]
+    install: go mod download
+    test: go test ./...
+    lint: go vet ./...
+    format: test -z "$(gofmt -l .)"
+    build: go build ./...
+    run: go run ./cmd/server
+    smoke: go build ./...
+    test_framework: go test (table-driven) + net/http/httptest
+    conventions: |
+      Standard library first; errors returned and wrapped with context, never ignored;
+      context.Context on request paths; small interfaces defined by the consumer.
+
+  - name: static-web
+    language: html-css-js
+    kind: frontend
+    use_when: "simple pages, landing pages or UIs with no build step"
+    docker_image: node:22-slim
+    scaffold: [index.html, styles.css, app.js, tests/]
+    install: npm install --no-save vitest jsdom
+    test: npx vitest run --environment jsdom
+    lint: npx eslint . || true
+    format: npx prettier --check . || true
+    build: ""
+    run: npx serve -l 8080 .
+    smoke: test -f index.html
+    test_framework: vitest + jsdom for app.js logic
+    conventions: |
+      Semantic HTML, mobile-first CSS, no inline event handlers, escape user content,
+      logic in app.js functions that tests can import.
+
+  # ───────── more Python ─────────
+
+  - name: python-django
+    language: python
+    kind: fullstack
+    use_when: "content-heavy or admin-heavy web apps needing auth, ORM and an admin panel out of the box"
+    docker_image: python:3.13-slim
+    scaffold: [requirements.txt, manage.py, config/settings.py, apps/, tests/]
+    install: pip install -r requirements.txt
+    test: pytest -q --tb=short
+    lint: ruff check .
+    format: ruff format --check .
+    build: python manage.py check --deploy --fail-level ERROR
+    run: python manage.py runserver 0.0.0.0:8000
+    smoke: python manage.py check
+    test_framework: pytest + pytest-django
+    conventions: |
+      One Django app per bounded area; fat models/services, thin views; Django ORM only (no raw SQL
+      string formatting); forms or DRF serializers for validation; settings from environment.
+
+  - name: python-flask
+    language: python
+    kind: backend
+    use_when: "very small web services or server-rendered pages with minimal structure"
+    docker_image: python:3.13-slim
+    scaffold: [requirements.txt, app/__init__.py, tests/]
+    install: pip install -r requirements.txt
+    test: pytest -q --tb=short
+    lint: ruff check .
+    format: ruff format --check .
+    build: ""
+    run: flask --app app run --host 0.0.0.0 --port 8000
+    smoke: python -c "from app import create_app; create_app()"
+    test_framework: pytest + Flask test client
+    conventions: |
+      Application factory (create_app); blueprints per feature; validate input explicitly;
+      Jinja autoescaping on; config from environment.
+
+  - name: python-cli
+    language: python
+    kind: cli
+    use_when: "command-line tools, scripts and automation"
+    docker_image: python:3.13-slim
+    scaffold: [pyproject.toml, src/<pkg>/__main__.py, tests/]
+    install: pip install -e .
+    test: pytest -q --tb=short
+    lint: ruff check .
+    format: ruff format --check .
+    build: ""
+    run: python -m <pkg> --help
+    smoke: python -m <pkg> --help
+    test_framework: pytest + typer.testing.CliRunner
+    conventions: |
+      Typer for commands; clear --help text; exit codes (0 ok, non-zero on error); errors to stderr;
+      logic in importable functions separate from the CLI layer.
+
+  # ───────── more JavaScript / TypeScript ─────────
+
+  - name: nestjs-ts
+    language: typescript
+    kind: backend
+    use_when: "larger structured TypeScript APIs with modules and dependency injection"
+    docker_image: node:22-slim
+    scaffold: [package.json, tsconfig.json, nest-cli.json, src/main.ts, src/app.module.ts, test/]
+    install: npm ci || npm install
+    test: npx jest
+    lint: npx eslint .
+    format: npx prettier --check .
+    build: npm run build
+    run: node dist/main.js
+    smoke: npm run build
+    test_framework: jest + @nestjs/testing + supertest
+    conventions: |
+      One module per feature (controller, service, DTOs); class-validator DTOs with a global
+      ValidationPipe; services hold logic, controllers stay thin; config via @nestjs/config.
+
+  - name: vue-vite-ts
+    language: typescript
+    kind: frontend
+    use_when: "web frontends where Vue is requested or preferred"
+    docker_image: node:22-slim
+    scaffold: [package.json, tsconfig.json, vite.config.ts, index.html, src/main.ts, src/App.vue]
+    install: npm ci || npm install
+    test: npx vitest run
+    lint: npx eslint .
+    format: npx prettier --check .
+    build: npm run build
+    run: npx vite --host 0.0.0.0 --port 5173
+    smoke: npm run build
+    test_framework: vitest + @vue/test-utils (jsdom)
+    conventions: |
+      Composition API with <script setup lang="ts">; Pinia for shared state; one typed API client;
+      loading/empty/error states; never v-html with user data.
+
+  - name: sveltekit-ts
+    language: typescript
+    kind: fullstack
+    use_when: "lightweight full-stack web apps where Svelte is requested or preferred"
+    docker_image: node:22-slim
+    scaffold: [package.json, svelte.config.js, vite.config.ts, src/routes/+page.svelte]
+    install: npm ci || npm install
+    test: npx vitest run
+    lint: npx svelte-check
+    format: npx prettier --check .
+    build: npm run build
+    run: node build
+    smoke: npm run build
+    test_framework: vitest + @testing-library/svelte
+    conventions: |
+      Load data in +page.server.ts; form actions for mutations; validate input server-side;
+      no {@html} with user data; secrets only in $env/static/private.
+
+  - name: angular-ts
+    language: typescript
+    kind: frontend
+    use_when: "enterprise-style frontends where Angular is requested"
+    docker_image: node:22-slim
+    scaffold: [package.json, angular.json, tsconfig.json, src/main.ts, src/app/]
+    install: npm ci || npm install
+    test: npx ng test --watch=false
+    lint: npx ng lint
+    format: npx prettier --check .
+    build: npx ng build
+    run: npx ng serve --host 0.0.0.0 --port 4200
+    smoke: npx ng build
+    test_framework: Angular CLI test runner (vitest in current CLI versions)
+    conventions: |
+      Standalone components; signals for state; services for API calls with typed HttpClient;
+      reactive forms with validators; no bypassSecurityTrust* with user data.
+
+  # ───────── JVM / .NET ─────────
+
+  - name: java-spring-boot
+    language: java
+    kind: backend
+    use_when: "APIs where Java/Spring is requested, or enterprise conventions matter"
+    docker_image: maven:3.9-eclipse-temurin-21
+    scaffold: [pom.xml, src/main/java/, src/main/resources/application.properties, src/test/java/]
+    install: mvn -q -B dependency:go-offline
+    test: mvn -q -B test
+    lint: mvn -q -B -DskipTests verify
+    format: ""
+    build: mvn -q -B -DskipTests package
+    run: java -jar target/app.jar
+    smoke: mvn -q -B -DskipTests package
+    test_framework: JUnit 5 + Spring Boot Test + MockMvc
+    conventions: |
+      Controller -> service -> repository layers; Spring Data JPA (no string-built queries);
+      Bean Validation (@Valid) on request DTOs; @ControllerAdvice for errors; constructor injection.
+
+  - name: dotnet-webapi
+    language: csharp
+    kind: backend
+    use_when: "APIs where C#/.NET is requested"
+    docker_image: mcr.microsoft.com/dotnet/sdk:10.0
+    scaffold: [Api/Api.csproj, Api/Program.cs, Api.Tests/Api.Tests.csproj]
+    install: dotnet restore
+    test: dotnet test --no-restore
+    lint: dotnet format --verify-no-changes
+    format: dotnet format --verify-no-changes
+    build: dotnet build --no-restore
+    run: dotnet run --project Api --urls http://0.0.0.0:8080
+    smoke: dotnet build --no-restore
+    test_framework: xUnit + WebApplicationFactory
+    conventions: |
+      Minimal APIs or controllers grouped by feature; nullable reference types on; EF Core with
+      LINQ (no string-built SQL); validation on request records; ProblemDetails for errors.
+
+  # ───────── Rust / PHP / Ruby ─────────
+
+  - name: rust-axum
+    language: rust
+    kind: backend
+    use_when: "high-performance or safety-critical services where Rust is requested"
+    docker_image: rust:1-slim
+    scaffold: [Cargo.toml, src/main.rs, tests/]
+    install: cargo fetch
+    test: cargo test
+    lint: cargo clippy -- -D warnings
+    format: cargo fmt --check
+    build: cargo build
+    run: cargo run
+    smoke: cargo build
+    test_framework: cargo test + tower::ServiceExt for handlers
+    conventions: |
+      axum + tokio; typed extractors and serde structs for validation; errors via thiserror into
+      IntoResponse; no unwrap() on request paths; sqlx with bound parameters.
+
+  - name: php-laravel
+    language: php
+    kind: fullstack
+    use_when: "web apps where PHP/Laravel is requested"
+    docker_image: composer:2
+    scaffold: [composer.json, artisan, app/, routes/, tests/]
+    install: composer install --no-interaction
+    test: php artisan test
+    lint: vendor/bin/pint --test
+    format: vendor/bin/pint --test
+    build: ""
+    run: php artisan serve --host=0.0.0.0 --port=8000
+    smoke: php artisan about
+    test_framework: PHPUnit/Pest via php artisan test
+    conventions: |
+      Form Requests for validation; Eloquent with mass-assignment protection ($fillable);
+      controllers thin, logic in services/actions; Blade escaping ({{ }}) only; config via .env.
+
+  - name: ruby-rails
+    language: ruby
+    kind: fullstack
+    use_when: "web apps where Ruby on Rails is requested"
+    docker_image: ruby:3.4
+    scaffold: [Gemfile, config/application.rb, app/, test/]
+    install: bundle install
+    test: bin/rails test
+    lint: bundle exec rubocop
+    format: bundle exec rubocop
+    build: ""
+    run: bin/rails server -b 0.0.0.0
+    smoke: bin/rails runner "puts :ok"
+    test_framework: Minitest (Rails default)
+    conventions: |
+      Rails conventions over configuration; strong parameters; validations on models;
+      ActiveRecord query interface (no interpolated SQL); ERB escaping by default.
+
+  # ───────── more web / API ─────────
+
+  - name: express-js
+    language: javascript
+    kind: backend
+    use_when: "plain JavaScript Node APIs (classic MERN/MEAN/MEVN backends)"
+    docker_image: node:22-slim
+    scaffold: [package.json, src/index.js, tests/]
+    install: npm ci || npm install
+    test: npx vitest run
+    lint: npx eslint .
+    format: npx prettier --check .
+    build: ""
+    run: node src/index.js
+    smoke: node --check src/index.js
+    test_framework: vitest + supertest
+    conventions: |
+      ES modules; express.Router per feature; validate input with zod or joi; centralised error
+      middleware; Mongoose schemas with validation when using MongoDB; env config via dotenv.
+
+  - name: fastify-ts
+    language: typescript
+    kind: backend
+    use_when: "fast, schema-first TypeScript APIs (Fastify or Hono)"
+    docker_image: node:22-slim
+    scaffold: [package.json, tsconfig.json, src/server.ts, tests/]
+    install: npm ci || npm install
+    test: npx vitest run
+    lint: npx eslint .
+    format: npx prettier --check .
+    build: npx tsc --noEmit
+    run: npx tsx src/server.ts
+    smoke: npx tsc --noEmit
+    test_framework: vitest + app.inject() / app.request()
+    conventions: |
+      JSON-schema or zod validation on every route; plugins per feature; typed handlers;
+      structured logging; graceful shutdown.
+
+  - name: graphql-apollo-ts
+    language: typescript
+    kind: backend
+    use_when: "GraphQL APIs in TypeScript"
+    docker_image: node:22-slim
+    scaffold: [package.json, tsconfig.json, src/schema.graphql, src/resolvers.ts, src/server.ts, tests/]
+    install: npm ci || npm install
+    test: npx vitest run
+    lint: npx eslint .
+    format: npx prettier --check .
+    build: npx tsc --noEmit
+    run: npx tsx src/server.ts
+    smoke: npx tsc --noEmit
+    test_framework: vitest + server.executeOperation()
+    conventions: |
+      Schema-first SDL; codegen types for resolvers; DataLoader to avoid N+1 queries;
+      depth/complexity limits; errors with extension codes, no stack traces to clients.
+
+  - name: python-graphql-strawberry
+    language: python
+    kind: backend
+    use_when: "GraphQL APIs in Python"
+    docker_image: python:3.13-slim
+    scaffold: [requirements.txt, app/schema.py, app/main.py, tests/]
+    install: pip install -r requirements.txt
+    test: pytest -q --tb=short
+    lint: ruff check .
+    format: ruff format --check .
+    build: ""
+    run: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    smoke: python -c "from app.schema import schema; print(schema)"
+    test_framework: pytest + schema.execute_sync()
+    conventions: |
+      Strawberry types with type hints; dataloaders for N+1; query depth limits; mounted on FastAPI.
+
+  - name: nuxt-ts
+    language: typescript
+    kind: fullstack
+    use_when: "full-stack Vue apps with server rendering and API routes"
+    docker_image: node:22-slim
+    scaffold: [package.json, nuxt.config.ts, app.vue, pages/, server/api/]
+    install: npm ci || npm install
+    test: npx vitest run
+    lint: npx nuxi typecheck
+    format: npx prettier --check .
+    build: npm run build
+    run: node .output/server/index.mjs
+    smoke: npm run build
+    test_framework: vitest + @nuxt/test-utils
+    conventions: |
+      useFetch/useAsyncData for data; server/api handlers validate input; runtimeConfig for secrets
+      (never public); composables for shared logic.
+
+  - name: astro
+    language: typescript
+    kind: frontend
+    use_when: "content sites, blogs, docs and marketing pages with little interactivity"
+    docker_image: node:22-slim
+    scaffold: [package.json, astro.config.mjs, src/pages/index.astro]
+    install: npm ci || npm install
+    test: npx vitest run
+    lint: npx astro check
+    format: npx prettier --check .
+    build: npm run build
+    run: npx astro preview --host 0.0.0.0
+    smoke: npm run build
+    test_framework: vitest (+ Astro container API for components)
+    conventions: |
+      Static by default; islands only where interactivity is needed; content collections with schemas;
+      optimised images; semantic HTML.
+
+  - name: react-router-ts
+    language: typescript
+    kind: fullstack
+    use_when: "full-stack React apps with loaders/actions (React Router framework mode, formerly Remix)"
+    docker_image: node:22-slim
+    scaffold: [package.json, react-router.config.ts, app/root.tsx, app/routes/]
+    install: npm ci || npm install
+    test: npx vitest run
+    lint: npx eslint .
+    format: npx prettier --check .
+    build: npm run build
+    run: npm start
+    smoke: npm run build
+    test_framework: vitest + @testing-library/react
+    conventions: |
+      Data in loaders, mutations in actions; validate form data server-side; progressive enhancement
+      with <Form>; error boundaries per route.
+
+  # ───────── mobile (logic + UI tests headless; no device/store builds) ─────────
+
+  - name: react-native-expo
+    language: typescript
+    kind: mobile
+    use_when: "cross-platform mobile apps in TypeScript/React"
+    docker_image: node:22-slim
+    scaffold: [package.json, app.json, tsconfig.json, app/_layout.tsx, app/index.tsx]
+    install: npm ci || npm install
+    test: npx jest
+    lint: npx expo lint
+    format: npx prettier --check .
+    build: npx tsc --noEmit
+    run: npx expo start --web
+    smoke: npx expo export --platform web
+    test_framework: jest (jest-expo preset) + @testing-library/react-native
+    conventions: |
+      Expo Router for navigation; functional components + hooks; typed API client; secure storage for
+      tokens (expo-secure-store); accessibilityLabel on touchables; handle offline/loading/error states.
+
+  - name: flutter
+    language: dart
+    kind: mobile
+    use_when: "cross-platform mobile (and web) apps in Dart/Flutter"
+    docker_image: ghcr.io/cirruslabs/flutter:stable
+    scaffold: [pubspec.yaml, lib/main.dart, test/]
+    install: flutter pub get
+    test: flutter test
+    lint: flutter analyze
+    format: dart format --output=none --set-exit-if-changed .
+    build: flutter build web
+    run: flutter run -d web-server --web-hostname 0.0.0.0 --web-port 8080
+    smoke: flutter analyze
+    test_framework: flutter_test (unit + widget tests)
+    conventions: |
+      Feature-first folders; state with Riverpod or Bloc; immutable models; repository layer for data;
+      Semantics labels for accessibility; no business logic inside widgets.
+
+  - name: kotlin-logic
+    language: kotlin
+    kind: mobile
+    use_when: "Android app logic (view models, domain, data) as a testable Kotlin module; no APK builds"
+    docker_image: gradle:8-jdk21
+    scaffold: [settings.gradle.kts, build.gradle.kts, src/main/kotlin/, src/test/kotlin/]
+    install: gradle dependencies --no-daemon -q
+    test: gradle test --no-daemon -q
+    lint: gradle check --no-daemon -q
+    format: ""
+    build: gradle build --no-daemon -q
+    run: ""
+    smoke: gradle build --no-daemon -q
+    test_framework: JUnit 5 + kotlinx-coroutines-test
+    conventions: |
+      Clean architecture (domain/data/presentation); coroutines + Flow; immutable data classes;
+      no Android framework classes in domain code so it stays testable.
+
+  - name: swift-package
+    language: swift
+    kind: mobile
+    use_when: "iOS app logic (models, services, view models) as a Swift package; no Xcode/app builds"
+    docker_image: swift:6.1
+    scaffold: [Package.swift, Sources/, Tests/]
+    install: swift package resolve
+    test: swift test
+    lint: swift build
+    format: ""
+    build: swift build
+    run: ""
+    smoke: swift build
+    test_framework: XCTest / Swift Testing
+    conventions: |
+      Value types by default; async/await; protocols for dependencies so they can be faked;
+      no UIKit/SwiftUI imports in the logic package.
+
+  # ───────── data engineering ─────────
+
+  - name: python-data-eng
+    language: python
+    kind: data
+    use_when: "ETL/ELT pipelines with Polars/DuckDB and orchestration (Prefect or Airflow-style DAGs)"
+    docker_image: python:3.13-slim
+    scaffold: [requirements.txt, pipelines/, src/, tests/, data/raw/]
+    install: pip install -r requirements.txt
+    test: pytest -q --tb=short
+    lint: ruff check .
+    format: ruff format --check .
+    build: ""
+    run: python -m pipelines.main
+    smoke: python -c "import pipelines"
+    test_framework: pytest (small fixture datasets per stage)
+    conventions: |
+      Extract/transform/load as separate pure steps; idempotent loads (re-runs give same result);
+      schema validation (pandera or explicit checks) between stages; partition by date; log row counts.
+
+  - name: dbt-duckdb
+    language: sql
+    kind: data
+    use_when: "analytics engineering: SQL models, tests and docs on a warehouse (DuckDB locally)"
+    docker_image: python:3.13-slim
+    scaffold: [dbt_project.yml, profiles.yml, models/staging/, models/marts/, seeds/]
+    install: pip install dbt-duckdb sqlfluff
+    test: dbt build --profiles-dir .
+    lint: sqlfluff lint models --dialect duckdb
+    format: ""
+    build: dbt parse --profiles-dir .
+    run: dbt run --profiles-dir .
+    smoke: dbt debug --profiles-dir .
+    test_framework: dbt tests (unique, not_null, relationships, accepted_values) + unit tests
+    conventions: |
+      staging -> intermediate -> marts layers; one model per file; ref() never hard-coded tables;
+      every primary key tested unique + not_null; documented columns in schema.yml.
+
+  - name: pyspark-local
+    language: python
+    kind: data
+    use_when: "big-data style transformations with Spark (run in local mode)"
+    docker_image: custom (python:3.13-slim + openjdk-21-jre-headless, built once by devops)
+    scaffold: [requirements.txt, jobs/, tests/]
+    install: pip install -r requirements.txt
+    test: pytest -q --tb=short
+    lint: ruff check .
+    format: ruff format --check .
+    build: ""
+    run: spark-submit jobs/main.py
+    smoke: python -c "import pyspark"
+    test_framework: pytest + a session-scoped local SparkSession fixture
+    conventions: |
+      DataFrame API (no collect() on large data); explicit schemas; transformations as functions
+      taking and returning DataFrames; avoid UDFs when built-ins exist.
+
+  # ───────── AI / deep learning / reinforcement learning (CPU-sized) ─────────
+
+  - name: python-ai-agents
+    language: python
+    kind: ai
+    use_when: "LLM apps: agents (LangGraph/LangChain), RAG with a vector DB, tool calling"
+    docker_image: python:3.13-slim
+    scaffold: [requirements.txt, src/, prompts/, evals/, tests/]
+    install: pip install -r requirements.txt
+    test: pytest -q --tb=short
+    lint: ruff check .
+    format: ruff format --check .
+    build: ""
+    run: python -m src.main
+    smoke: python -c "import src"
+    test_framework: pytest with a FakeLLM / fake embeddings
+    conventions: |
+      Provider behind an interface; prompts as files; pydantic structured outputs; retrieval returns
+      sources; offline eval set in evals/; tests never call real models.
+
+  - name: python-pytorch
+    language: python
+    kind: ml
+    use_when: "deep learning with PyTorch / Lightning: CNNs, RNNs, transformers, fine-tuning small models"
+    docker_image: python:3.13-slim
+    scaffold: [requirements.txt, src/model.py, src/data.py, src/train.py, src/evaluate.py, configs/, tests/]
+    install: pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+    test: pytest -q --tb=short
+    lint: ruff check .
+    format: ruff format --check .
+    build: ""
+    run: python -m src.train --config configs/default.yaml
+    smoke: python -c "import torch; import src.model"
+    test_framework: pytest (shape tests, overfit-one-batch test, deterministic forward pass)
+    conventions: |
+      Device-agnostic code (cpu/cuda); seeds for torch/numpy/random; config files not hard-coded
+      hyperparameters; tiny dataset + few epochs so CI runs in seconds; save checkpoints and metrics;
+      separate train/val/test; log to MLflow when available.
+
+  - name: python-tensorflow
+    language: python
+    kind: ml
+    use_when: "deep learning where TensorFlow/Keras is requested"
+    docker_image: python:3.12-slim
+    scaffold: [requirements.txt, src/model.py, src/train.py, tests/]
+    install: pip install -r requirements.txt
+    test: pytest -q --tb=short
+    lint: ruff check .
+    format: ruff format --check .
+    build: ""
+    run: python -m src.train
+    smoke: python -c "import keras; import src.model"
+    test_framework: pytest (model builds, output shapes, short fit reduces loss)
+    conventions: |
+      Keras 3 functional API; tf.data pipelines; seeds set; small configs for tests; SavedModel/.keras export.
+
+  - name: python-rl
+    language: python
+    kind: ml
+    use_when: "reinforcement learning: custom Gymnasium environments and agents (PPO, DQN, SAC)"
+    docker_image: python:3.13-slim
+    scaffold: [requirements.txt, envs/, agents/, train.py, evaluate.py, tests/]
+    install: pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+    test: pytest -q --tb=short
+    lint: ruff check .
+    format: ruff format --check .
+    build: ""
+    run: python train.py --timesteps 20000
+    smoke: python -c "import gymnasium, stable_baselines3"
+    test_framework: pytest + gymnasium.utils.env_checker.check_env
+    conventions: |
+      Environments pass check_env; documented observation/action spaces and reward; seeded resets;
+      Stable-Baselines3 for standard algorithms; compare against a random-policy baseline;
+      short training budgets in tests; save model + evaluation report.
+
+  # ───────── cloud / infrastructure (validate & plan only, never apply to real accounts) ─────────
+
+  - name: terraform
+    language: hcl
+    kind: infra
+    use_when: "infrastructure as code for AWS/Azure/GCP"
+    docker_image: hashicorp/terraform:1.13
+    scaffold: [main.tf, variables.tf, outputs.tf, versions.tf, tests/]
+    install: terraform init -backend=false
+    test: terraform test
+    lint: terraform validate
+    format: terraform fmt -check -recursive
+    build: ""
+    run: ""
+    smoke: terraform validate
+    test_framework: terraform test (.tftest.hcl, plan-mode runs with mock providers)
+    conventions: |
+      Modules per concern; variables typed with descriptions and validation; no hard-coded secrets or
+      account IDs; least-privilege IAM; tags on all resources; remote state configured but disabled
+      locally; NEVER run apply.
+
+  - name: aws-cdk-ts
+    language: typescript
+    kind: infra
+    use_when: "AWS infrastructure defined in TypeScript"
+    docker_image: node:22-slim
+    scaffold: [package.json, cdk.json, bin/app.ts, lib/stack.ts, test/]
+    install: npm ci || npm install
+    test: npx jest
+    lint: npx tsc --noEmit
+    format: npx prettier --check .
+    build: npx cdk synth --quiet
+    run: ""
+    smoke: npx cdk synth --quiet
+    test_framework: jest + aws-cdk-lib/assertions (Template.fromStack)
+    conventions: |
+      One stack per deployable unit; L2 constructs; least-privilege grants (grantRead etc.);
+      no hard-coded account/region; NEVER run cdk deploy.
+
+  - name: pulumi-python
+    language: python
+    kind: infra
+    use_when: "infrastructure as code in Python with Pulumi"
+    docker_image: python:3.13-slim
+    scaffold: [Pulumi.yaml, __main__.py, requirements.txt, tests/]
+    install: pip install -r requirements.txt
+    test: pytest -q --tb=short
+    lint: ruff check .
+    format: ruff format --check .
+    build: ""
+    run: ""
+    smoke: python -c "import pulumi"
+    test_framework: pytest + pulumi.runtime.set_mocks
+    conventions: |
+      Component resources for reuse; config via pulumi.Config; secrets marked secret; tags everywhere;
+      unit tests with mocks only; NEVER run pulumi up.
+
+  - name: kubernetes-helm
+    language: yaml
+    kind: infra
+    use_when: "deploying containers to Kubernetes (manifests or Helm charts)"
+    docker_image: alpine/k8s:1.33.4
+    scaffold: [Chart.yaml, values.yaml, templates/]
+    install: ""
+    test: helm lint . && helm template . | kubeconform -strict -summary
+    lint: helm lint .
+    format: ""
+    build: helm template .
+    run: ""
+    smoke: helm template .
+    test_framework: helm lint + kubeconform schema validation
+    conventions: |
+      Resource requests/limits; liveness/readiness probes; non-root securityContext; config in
+      ConfigMaps, secrets in Secrets (never in values.yaml); labels per Kubernetes conventions.
+
+  - name: github-actions
+    language: yaml
+    kind: infra
+    use_when: "CI/CD pipelines"
+    docker_image: rhysd/actionlint:latest
+    scaffold: [.github/workflows/ci.yml]
+    install: ""
+    test: actionlint
+    lint: actionlint
+    format: ""
+    build: ""
+    run: ""
+    smoke: actionlint
+    test_framework: actionlint
+    conventions: |
+      Run lint, test and build per component; cache dependencies; pin actions to versions;
+      least-privilege `permissions:`; secrets only via ${{ secrets.* }}.
+
+  - name: aws-sam-python
+    language: python
+    kind: infra
+    use_when: "serverless APIs and functions on AWS Lambda"
+    docker_image: public.ecr.aws/sam/build-python3.13
+    scaffold: [template.yaml, src/handlers/, tests/]
+    install: pip install -r requirements.txt
+    test: pytest -q --tb=short
+    lint: sam validate --lint
+    format: ruff format --check .
+    build: sam build
+    run: ""
+    smoke: sam validate --lint
+    test_framework: pytest calling handlers with sample events (moto for AWS mocks)
+    conventions: |
+      Thin handlers calling testable functions; environment variables for config; least-privilege
+      policies per function; idempotent handlers; NEVER run sam deploy.
+
+# ───────── services: databases & infrastructure the app depends on ─────────
+# Started with docker compose next to the app's components. The architect lists the ones a
+# design needs; devops adds them to docker-compose.yml; tests use them via env vars.
+
+services:
+  - {name: postgres,  image: "postgres:17",            port: 5432,  env: "DATABASE_URL=postgresql://app:app@localhost:5432/app", use_when: "default relational DB"}
+  - {name: mysql,     image: "mysql:8.4",              port: 3306,  env: "DATABASE_URL=mysql://app:app@localhost:3306/app",      use_when: "LAMP/Laravel or when MySQL is requested"}
+  - {name: mongodb,   image: "mongo:8",                port: 27017, env: "MONGO_URL=mongodb://localhost:27017/app",              use_when: "document data, MERN/MEAN/MEVN"}
+  - {name: redis,     image: "redis:8",                port: 6379,  env: "REDIS_URL=redis://localhost:6379/0",                  use_when: "caching, queues, sessions, rate limits"}
+  - {name: pgvector,  image: "pgvector/pgvector:pg17", port: 5432,  env: "DATABASE_URL=postgresql://app:app@localhost:5432/app", use_when: "vector search inside Postgres for RAG"}
+  - {name: chroma,    image: "chromadb/chroma:latest", port: 8000,  env: "CHROMA_URL=http://localhost:8000",                     use_when: "standalone vector DB for RAG prototypes"}
+  - {name: kafka,     image: "apache/kafka:latest",    port: 9092,  env: "KAFKA_BOOTSTRAP=localhost:9092",                      use_when: "event streaming / data pipelines"}
+  - {name: minio,     image: "minio/minio:latest",     port: 9000,  env: "S3_ENDPOINT=http://localhost:9000",                    use_when: "S3-compatible object storage"}
+  - {name: localstack, image: "localstack/localstack:latest", port: 4566, env: "AWS_ENDPOINT_URL=http://localhost:4566",        use_when: "mock AWS services for cloud code tests"}
+# SQLite needs no service (file-based); use it for the smallest apps and for tests.
+
+# ───────── presets: popular stack combos the architect can pick in one go ─────────
+
+presets:
+  - {name: MERN,          components: {api: express-js, web: react-vite-ts},        services: [mongodb]}
+  - {name: MEAN,          components: {api: express-js, web: angular-ts},           services: [mongodb]}
+  - {name: MEVN,          components: {api: express-js, web: vue-vite-ts},          services: [mongodb]}
+  - {name: PERN,          components: {api: express-js, web: react-vite-ts},        services: [postgres]}
+  - {name: T3,            components: {app: nextjs-ts},                             services: [postgres], notes: "tRPC + Prisma + Tailwind + Auth.js inside Next.js"}
+  - {name: LAMP-Laravel,  components: {app: php-laravel},                           services: [mysql]}
+  - {name: Django-React,  components: {api: python-django, web: react-vite-ts},     services: [postgres], notes: "Django REST Framework API"}
+  - {name: FastAPI-React, components: {api: python-fastapi, web: react-vite-ts},    services: [postgres]}
+  - {name: Spring-React,  components: {api: java-spring-boot, web: react-vite-ts},  services: [postgres]}
+  - {name: Rails-Hotwire, components: {app: ruby-rails},                            services: [postgres]}
+  - {name: NestJS-Next,   components: {api: nestjs-ts, web: nextjs-ts},             services: [postgres, redis]}
+  - {name: Next-Supabase-style, components: {app: nextjs-ts},                       services: [postgres], notes: "Postgres + row-level security pattern, auth via Auth.js"}
+  - {name: Mobile-Expo-API,     components: {mobile: react-native-expo, api: python-fastapi}, services: [postgres]}
+  - {name: Mobile-Flutter-API,  components: {mobile: flutter, api: go-api},          services: [postgres]}
+  - {name: RAG-App,       components: {api: python-ai-agents, web: react-vite-ts},  services: [pgvector]}
+  - {name: Data-Platform, components: {pipelines: python-data-eng, models: dbt-duckdb, dashboard: python-streamlit}, services: []}
+  - {name: ML-Service,    components: {training: python-data-ml, api: python-fastapi}, services: []}
+  - {name: DL-Service,    components: {training: python-pytorch, api: python-fastapi}, services: []}
+  - {name: Cloud-Ready,   components: {infra: terraform, ci: github-actions, k8s: kubernetes-helm}, services: [localstack], notes: "add to any app"}
+
+# UI libraries (used inside frontend stacks when design.md asks for them):
+# Tailwind CSS, shadcn/ui (React), Vuetify/PrimeVue (Vue), Angular Material, Flutter Material 3.
+
+# Not supported yet (architect returns "blocked" and explains): native iOS/Android app builds and
+# store releases, desktop GUI apps, game engines, embedded/firmware, deploying to real cloud
+# accounts, and large-model training that needs GPUs. These lack a headless test-and-run loop here.
