@@ -131,16 +131,56 @@ deep_learning_engineer, rl_engineer, cloud_engineer)
 and `fast` (everyone else). Free tier: Groq/Gemini; keep `get_llm(tier)` the only place models
 are created.
 
+## Office view (game UI)
+A Sims-style 2D top-down pixel office where you watch the team work: agents sit in team rooms,
+walk to each other on handoffs and show what they're doing. Original art only (own sprites or a
+free, permissively licensed office tileset); not a copy of any existing game.
+
+- **Viewer, not engine.** The office only reads the event stream. The agent graph never imports
+  or waits on it, runs headless without it, and the viewer makes no LLM calls.
+- **Event format.** `runs/<id>/events.jsonl`, one JSON object per line: `{"t": secs, "type": ..., "agent": ...}`.
+  | type | extra fields |
+  |---|---|
+  | `activate` | objective, reads |
+  | `handoff` | from, to, objective |
+  | `tool_call` | tool, arg (short) |
+  | `artifact_written` | name |
+  | `tests` | passed, failed |
+  | `blocked` | questions |
+  | `result` | status, summary, tokens |
+  | `finish` | status, reason |
+  The same events are emitted live via LangGraph's `get_stream_writer()` / `stream_mode="custom"`.
+- **Rooms.** Leadership office (tech_lead), planning room with a whiteboard (the task board), build
+  floor, QA lab, review meeting room, ops server room. Only agents the run wakes appear.
+- **Event → animation.** handoff: the Tech Lead walks to the agent, speech bubble with the objective.
+  activate/tool_call: typing, thought bubble with the tool and file. blocked: "?" over the head and
+  a walk to the owner of the answer. tests failed: a bug sprite on the desk, the debugger visits.
+  review: reviewers meet in the meeting room and return with ✅/🔴. Idle: coffee machine.
+- **Game layer.** Per-agent stats (tasks done, fix loops, tokens, first-try streak); budget as an
+  energy/clock bar; click a desk to read the agent's artifacts; you appear as the client, and plan
+  approval happens in the meeting room.
+- **Files.** `office/index.html`, `office/main.js` (Phaser 3, exact version from cdnjs),
+  `office/assets/`, `office/sample-events.jsonl` (for building the UI without LLM calls);
+  `devteam/events.py`; `server.py` (live mode only).
+- **Modes.** Replay (open a run's events.jsonl, works offline) first; live (WebSocket) from step 15.
+
 ## Build order (commit after each; check before moving on)
 11. **Registry + builder.** Load agents.yaml, validate, build 3 agents without tools.
     Check: each agent answers a hard-coded input in the required JSON format.
 12. **Workspace tools.** Check: path escape rejected; bad Python edit rejected and file unchanged;
     viewer pages correctly; search returns file list.
-13. **Artifacts + TeamState + SQLite checkpointer.** Check: kill a run midway and resume it.
+13. **Artifacts + TeamState + SQLite checkpointer + event log** (`devteam/events.py` writes
+    `runs/<id>/events.jsonl`, see Office view). Check: kill a run midway and resume it; the run's
+    events.jsonl validates against the event types.
 14. **Tech Lead supervisor (handoff → Command).** Planning team only.
     Check: request → prd, domain_notes, design, tasks.json; log every routing decision.
+14b. **Office replay viewer** (`office/`, Phaser 3): rooms per team, avatars at desks, pathfinding
+    between desks, speech/thought bubbles, playback controls (play/pause/speed/scrub).
+    Check: replaying the step 14 run's events.jsonl shows every handoff as a walk + bubble.
 15. **Human approval with interrupt()** after the task board (`--approve-plan`).
-    Check: run pauses, you approve or edit, it continues.
+    Live office: `server.py` (FastAPI WebSocket) streams events while the graph runs, and the
+    meeting room's "Approve plan" button resumes the interrupt().
+    Check: run pauses, you approve or edit (CLI or office), it continues.
 16. **One builder + per-task quality loop** (test_engineer, backend_dev, qa_runner, debugger).
     Check: a 3-task backend app goes green task by task.
 17. **All builders + domain advisors.** Check: Tech Lead picks the right advisor/builder.
@@ -148,6 +188,9 @@ are created.
     Check: plant a SQL-injection bug; security_reviewer fails it; fix goes to the right owner.
 19. **Parallel tasks with Send** (independent tasks, max 2 concurrent). Check: logs show overlap,
     no file conflicts.
+19b. **Office game layer**: per-agent stats, budget energy/clock bar, clickable artifacts on desks,
+    one animation per event type, parallel builders visibly working at once.
+    Check: a full run replays with stats that match the run's activation log.
 20. **Ops** (devops, docs_writer). Check: generated project installs, tests pass, smoke check runs.
 21. **Stack profiles + Docker sandbox.** Load stacks.yaml; qa_runner/run_command use profile
     commands; non-Python stacks run in Docker. Check: the same small API built once as
