@@ -1,19 +1,30 @@
 """Turn an AgentSpec from agents.yaml into a callable agent.
 
-Step 11: llm agents are a single prompt -> reply call (no tools yet). Each agent sees only the
-artifacts named in its `reads`, and its reply must end with the shared JSON result block.
+An llm agent is a small tool-calling loop: the model either calls tools (bound to one workspace)
+or gives its final answer. The loop is capped at the agent's `max_steps` tool rounds, and the
+final reply must end with the shared JSON result block.
 """
 
 import json
 from collections.abc import Callable
 from typing import Literal
 
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel, ValidationError
 
-from devteam.llm import invoke
+from devteam.llm import get_llm, invoke_messages
 from devteam.registry import AgentSpec, load_registry
+from devteam.toolbox import Workspace, make_tools
 
 MISSING = "(not provided)"
+BUDGET_NOTE = (
+    "Your tool budget for this activation is used up. Do not call any more tools. "
+    "Reply now with your final answer, ending with the result block."
+)
+REPAIR_NOTE = (
+    "Your reply did not end with a valid result block. Reply again with only the result block: "
+    '{"status": "done" | "blocked" | "failed", "summary": "...", "questions": [], "handoff_notes": []}'
+)
 
 
 class AgentResult(BaseModel):
@@ -60,68 +71,85 @@ def render_inputs(spec: AgentSpec, inputs: dict[str, str]) -> str:
     return "\n\n".join(sections)
 
 
-def build_agent(spec: AgentSpec, shared_rules: str) -> Callable[[dict[str, str]], dict]:
-    """Return agent(inputs) -> {"result": AgentResult, "raw": reply text}."""
+def system_prompt(spec: AgentSpec, shared_rules: str) -> str:
+    """Shared rules + role prompt + what this activation must produce and with which budget."""
+    work_note = (
+        f"Your outputs: {', '.join(spec.writes) or 'none'}. Produce them with your tools "
+        f"({', '.join(spec.tools)}); artifacts go through write_artifact, project files through "
+        f"create_file/edit_file. You have at most {spec.max_steps} rounds of tool calls."
+    )
+    return f"{shared_rules.strip()}\n\n{spec.prompt.strip()}\n\n{work_note}"
+
+
+def _short(args: dict, limit: int = 80) -> str:
+    """One-line summary of tool arguments for logs (long content is elided)."""
+    parts = []
+    for key, value in args.items():
+        text = str(value).replace("\n", " ")
+        parts.append(f"{key}={text[:40] + '...' if len(text) > 40 else text!r}")
+    line = ", ".join(parts)
+    return line if len(line) <= limit else line[: limit - 3] + "..."
+
+
+def build_agent(spec: AgentSpec, shared_rules: str) -> Callable[[dict[str, str], Workspace], dict]:
+    """Return agent(inputs, workspace) -> {"result", "raw", "steps", "tool_calls"}."""
     if spec.kind == "tool":
         raise NotImplementedError(f"{spec.name!r} is a tool node; tool nodes are built in later steps")
-    system = f"{shared_rules.strip()}\n\n{spec.prompt.strip()}"
+    system = system_prompt(spec, shared_rules)
 
-    def agent(inputs: dict[str, str]) -> dict:
-        print(f"[{spec.name}] tier={spec.model_tier} reads={spec.reads}")
-        raw = invoke(spec.model_tier, system, render_inputs(spec, inputs))
-        result = parse_result(raw)
-        print(f"[{spec.name}] status={result.status} summary={result.summary[:100]!r}")
-        return {"result": result, "raw": raw}
+    def agent(inputs: dict[str, str], workspace: Workspace) -> dict:
+        tools, missing = make_tools(workspace, spec.tools)
+        by_name = {t.name: t for t in tools}
+        plain = get_llm(spec.model_tier)
+        model = plain.bind_tools(tools) if tools else plain
+        print(f"[{spec.name}] tier={spec.model_tier} reads={spec.reads} tools={list(by_name)}"
+              + (f" (not built yet: {missing})" if missing else ""))
+
+        messages = [SystemMessage(system), HumanMessage(render_inputs(spec, inputs))]
+        tool_calls: list[dict] = []
+        steps = 0
+        reply = invoke_messages(model, messages, spec.model_tier, set(by_name))
+        messages.append(reply)
+        while reply.tool_calls:
+            if steps >= spec.max_steps:
+                for call in reply.tool_calls:  # every tool call needs an answer before the next turn
+                    messages.append(ToolMessage("ERROR: tool budget used up", tool_call_id=call["id"]))
+                messages.append(HumanMessage(BUDGET_NOTE))
+                reply = invoke_messages(plain, messages, spec.model_tier)
+                messages.append(reply)
+                break
+            steps += 1
+            for call in reply.tool_calls:
+                tool = by_name.get(call["name"])
+                if tool is None:
+                    out = ToolMessage(
+                        f"ERROR: unknown tool {call['name']!r}; you have {list(by_name)}",
+                        tool_call_id=call["id"],
+                    )
+                else:
+                    out = tool.invoke(call)  # returns a ToolMessage; errors come back as "ERROR: ..."
+                tool_calls.append({"tool": call["name"], "args": call["args"]})
+                first = str(out.content).splitlines()[0] if out.content else ""
+                print(f"  [{spec.name}] {call['name']}({_short(call['args'])}) -> {first[:90]}")
+                messages.append(out)
+            reply = invoke_messages(model, messages, spec.model_tier, set(by_name))
+            messages.append(reply)
+
+        raw = reply.text
+        try:
+            result = parse_result(raw)
+        except AgentOutputError:
+            messages.append(HumanMessage(REPAIR_NOTE))  # one repair attempt, then give up
+            raw = invoke_messages(plain, messages, spec.model_tier).text
+            result = parse_result(raw)
+        print(f"[{spec.name}] status={result.status} steps={steps} summary={result.summary[:100]!r}")
+        return {"result": result, "raw": raw, "steps": steps, "tool_calls": tool_calls}
 
     agent.__name__ = spec.name
     return agent
 
 
-def get_agent(name: str) -> Callable[[dict[str, str]], dict]:
+def get_agent(name: str) -> Callable[[dict[str, str], Workspace], dict]:
     """Convenience: look up `name` in agents.yaml and build it."""
     registry = load_registry()
     return build_agent(registry.get(name), registry.shared_rules)
-
-
-# Step 11 check: three agents (two tiers, two teams) answer hard-coded inputs in the JSON format.
-CHECK_INPUTS = {
-    "product_manager": {
-        "request": "A tiny API to shorten URLs: POST a long URL, get a short code; GET the code redirects.",
-    },
-    "architect": {
-        "prd": (
-            "Goal: shorten URLs. Story (MUST): As a user I POST a URL and get a 6-char code.\n"
-            "AC: Given a valid URL, When I POST /links, Then I get 201 and a code.\n"
-            "Story (MUST): GET /{code} redirects (307) to the URL; unknown code -> 404."
-        ),
-        "stack_catalog": "python-fastapi: use_when small JSON APIs; pytest + httpx TestClient; SQLite ok.",
-    },
-    "debugger": {
-        "task": "T2: GET /{code} redirects to the stored URL; unknown code returns 404.",
-        "test_report": (
-            "FAILED tests/test_links.py::test_unknown_code_404 - assert 500 == 404\n"
-            "app/services.py:14 in resolve: return LINKS[code]  KeyError: 'zzzzzz'"
-        ),
-        "test_files": (
-            "def test_unknown_code_404(client):\n"
-            "    assert client.get('/zzzzzz', follow_redirects=False).status_code == 404"
-        ),
-        "related_files": (
-            "# app/services.py\nLINKS = {}\n\ndef resolve(code):\n    return LINKS[code]\n\n"
-            "# app/main.py\n@app.get('/{code}')\ndef go(code):\n"
-            "    return RedirectResponse(resolve(code), 307)"
-        ),
-    },
-}
-
-if __name__ == "__main__":
-    failures = 0
-    for agent_name, agent_inputs in CHECK_INPUTS.items():
-        try:
-            out = get_agent(agent_name)(agent_inputs)
-            print(json.dumps(out["result"].model_dump(), indent=2)[:600], "\n")
-        except AgentOutputError as exc:
-            failures += 1
-            print(f"[{agent_name}] FAILED: {exc}\n")
-    print("step 11 check:", "PASS" if failures == 0 else f"{failures} agent(s) failed")
-    raise SystemExit(1 if failures else 0)

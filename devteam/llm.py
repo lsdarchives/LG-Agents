@@ -1,12 +1,15 @@
 """v2 model access: get_llm(tier) is the only place chat models are created."""
 
+import json
+import re
 import time
 from functools import cache
 from typing import Literal
 
 from dotenv import load_dotenv
 from langchain_core.exceptions import ModelRateLimitError
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.runnables import Runnable
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
 
@@ -55,12 +58,47 @@ def _is_daily_quota(exc: Exception) -> bool:
 
 def invoke(tier: Tier, system: str, user: str) -> str:
     """Send one system + user message to the tier's model, retrying 429/503. Returns reply text."""
-    llm = get_llm(tier)
     messages = [SystemMessage(system), HumanMessage(user)]
+    return invoke_messages(get_llm(tier), messages, tier).text
+
+
+def _recover_phantom_tool_call(exc: Exception, tool_names: set[str]) -> AIMessage | None:
+    """Groq + GPT-OSS sometimes sends its final JSON answer as a call to a tool that doesn't exist
+    (e.g. "json"); Groq rejects it with 400 tool_use_failed. The rejected call's arguments ARE the
+    intended answer, so return them as a plain text reply. Calls to real tools are not recovered."""
+    body = getattr(exc, "body", None)
+    error = body.get("error", body) if isinstance(body, dict) else None
+    if not isinstance(error, dict) or error.get("code") != "tool_use_failed":
+        return None
+    raw = error.get("failed_generation") or ""
+    try:
+        generation = json.loads(raw)
+        name = generation.get("name") if isinstance(generation, dict) else None
+        content = json.dumps(generation.get("arguments", generation)) if name else None
+    except json.JSONDecodeError:
+        # e.g. two JSON objects inside "arguments": keep the raw text; parse_result finds the result.
+        match = re.match(r'\s*\{\s*"name"\s*:\s*"([^"]+)"', raw)
+        name, content = (match.group(1), raw) if match else (None, None)
+    if not name or name in tool_names:
+        return None
+    print(f"  [llm] recovered final answer sent as phantom tool {name!r}")
+    return AIMessage(content=content)
+
+
+def invoke_messages(
+    model: Runnable, messages: list[BaseMessage], tier: Tier, tool_names: set[str] | None = None
+) -> AIMessage:
+    """Invoke any chat model (e.g. one with tools bound) on a message list, retrying 429/503.
+
+    `tool_names` are the tools bound to `model`; a call to any other name is treated as text.
+    """
     for attempt in range(len(RETRY_WAITS) + 1):
         try:
-            return llm.invoke(messages).text
+            return model.invoke(messages)
         except Exception as exc:
+            recovered = _recover_phantom_tool_call(exc, tool_names or set())
+            if recovered is not None:
+                return recovered
             if not _should_retry(exc):
                 raise
             if _is_daily_quota(exc):

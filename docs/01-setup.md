@@ -54,7 +54,8 @@ See [06-v2-guide.md](06-v2-guide.md) for each step's walkthrough.
 
 | Step | Check | Command / how |
 |---|---|---|
-| 11 | agents.yaml validates; three agents reply with a valid result block | `.venv\Scripts\python -m devteam.registry` (no API calls), then `.venv\Scripts\python -X utf8 -m devteam.builder` (requires `.env`; expect `step 11 check: PASS`) |
+| 11 | agents.yaml validates; three agents reply with a valid result block | `.venv\Scripts\python -m devteam.registry` (no API calls), then `.venv\Scripts\python -X utf8 -m checks.step11` (requires `.env`; expect `step 11 check: PASS`) |
+| 12 | Workspace tools refuse escapes and bad edits; agents write artifacts with tools | `.venv\Scripts\python -m pytest checks -q` (no API calls), then `.venv\Scripts\python -X utf8 -m checks.phase01` (requires `.env`; expect `phase 1 check: PASS`; artifacts in `workspace/check-phase01/.devteam/`) |
 
 Lint the project code itself:
 

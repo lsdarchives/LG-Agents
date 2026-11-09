@@ -74,12 +74,14 @@ devteam/
   config.py                 # model tiers -> model IDs, caps, concurrency
   llm.py                    # get_llm(tier) with retry/backoff on 429
   registry.py               # load + validate agents.yaml (pydantic)
-  builder.py                # build_agent(spec) -> node (ReAct agent with tools) or tool node
-  tools/workspace.py        # file tools, locked to workspace/
-  tools/exec.py             # run_tests, run_command (allow-list), qa_runner
+  builder.py                # build_agent(spec) -> tool-calling agent loop, or tool node
+  toolbox/workspace.py      # file tools, locked to workspace/ (`toolbox`: v1 owns devteam/tools.py)
+  toolbox/exec.py           # run_tests, run_command (allow-list), qa_runner
   artifacts.py              # read/write artifacts in workspace/.devteam/
-  state.py                  # TeamState with reducers
-  graph.py                  # supervisor graph, subgraphs, checkpointer
+  team_state.py             # TeamState with reducers (v1 owns state.py)
+  team_graph.py             # supervisor graph, subgraphs, checkpointer (v1 owns graph.py)
+  events.py                 # events.jsonl writer + live stream (office view)
+checks/                     # offline pytest checks + live `python -m checks.phaseNN`
 main.py                     # python main.py "build a ..." [--approve-plan] [--trace]
 workspace/<run_id>/         # generated project + .devteam/ artifacts (gitignored)
 ```
