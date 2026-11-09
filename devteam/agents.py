@@ -8,20 +8,34 @@ from dotenv import load_dotenv
 from langchain_core.exceptions import ModelRateLimitError
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_groq import ChatGroq
 
 from devteam import prompts
 from devteam.state import DevState
 
-# Change the model here only. If a model is slow or overloaded, try another Flash model.
-MODEL_NAME = "gemini-3.5-flash"
+# Switch provider here only: "groq" (primary) or "gemini" (fallback).
+PROVIDER = "groq"
+MODEL_NAMES = {
+    "groq": "openai/gpt-oss-120b",  # GROQ_API_KEY; large free daily quota
+    "gemini": "gemini-3.5-flash",  # GOOGLE_API_KEY; free tier ~20 requests/model/day
+}
+MODEL_NAME = MODEL_NAMES[PROVIDER]
 RETRY_WAITS = [10, 20, 40]  # seconds to wait after each retryable error
 MAX_OUTPUT_CHARS = 3000  # keep only the tail of test output in prompts (lean context)
 
 
 @lru_cache(maxsize=1)
 def get_llm():
-    """Create the chat model once. Switching provider is a change here only."""
-    load_dotenv()  # reads GOOGLE_API_KEY from .env
+    """Create the chat model once. Switching provider is a change to PROVIDER only."""
+    load_dotenv()  # reads GROQ_API_KEY / GOOGLE_API_KEY from .env
+    if PROVIDER == "groq":
+        return ChatGroq(
+            model=MODEL_NAME,
+            temperature=0.2,
+            reasoning_effort="low",  # gpt-oss reasons before answering; low keeps it fast
+            timeout=120,  # seconds per request, so a hung call fails instead of waiting forever
+            max_retries=0,  # we do our own backoff in call_llm, so retries don't stack up
+        )
     return ChatGoogleGenerativeAI(
         model=MODEL_NAME,
         temperature=0.2,
@@ -56,7 +70,7 @@ def call_llm(system: str, user: str) -> str:
             if _is_daily_quota(exc):
                 raise RuntimeError(
                     f"Daily free-tier quota for {MODEL_NAME} is used up; retrying today won't "
-                    "help. Switch MODEL_NAME to another model, use the fallback provider, "
+                    "help. Switch PROVIDER (or MODEL_NAMES) to another model/provider, "
                     "or wait for the reset."
                 ) from exc
             if attempt == len(RETRY_WAITS):

@@ -3,3 +3,4 @@ langchain-google-genai
 pytest
 ruff
 python-dotenv
+langchain-groq

@@ -11,20 +11,19 @@ before implementing it, and stop after each step so I can run and check it.
 - CLI only, no frontend: `python main.py "task description"`
 - One LLM model for all agents
 - Python 3.11+ (use 3.14; 3.15 lacks a zstandard wheel), venv, deps in requirements.txt:
-  langgraph, langchain-google-genai, pytest, ruff, python-dotenv (mlflow optional, step 10)
+  langgraph, langchain-google-genai, langchain-groq, pytest, ruff, python-dotenv (mlflow optional, step 10)
 
-## LLM provider: Google Gemini (free tier)
-- Use `ChatGoogleGenerativeAI` from `langchain-google-genai`; key is `GOOGLE_API_KEY` in `.env`
-- Model: a free-tier Flash model (currently `gemini-3.5-flash`; 3.8-flash was overloaded), with
-  `thinking_level="low"` (Gemini 3's default high is far slower); set it ONCE as `MODEL_NAME` in
-  `devteam/agents.py` so it's easy to change. Check exact model IDs in Google AI Studio.
+## LLM provider: Groq (free tier), Gemini as fallback
+- Primary: `ChatGroq` from `langchain-groq`, model `openai/gpt-oss-120b`, `reasoning_effort="low"`;
+  key is `GROQ_API_KEY` in `.env`. Free tier is far larger than Gemini's (reported ~1K req/day)
+- Fallback: `ChatGoogleGenerativeAI` (`gemini-3.5-flash`, `thinking_level="low"`), `GOOGLE_API_KEY`
+- Set `PROVIDER` ONCE in `devteam/agents.py` (`MODEL_NAMES` holds one model per provider); all
+  model creation stays in `get_llm()` so switching is a one-line change
 - Free tier has per-minute and per-day limits: wrap every LLM call with retry + backoff on
   429 / RESOURCE_EXHAUSTED and 503 / UNAVAILABLE (wait 10s, 20s, 40s, then fail clearly);
   library retries off (`max_retries=0`) so they don't stack. A per-day quota 429 fails at once
-  (free tier can be 20 requests/model/day; waiting seconds won't help)
+  (Gemini free tier can be 20 requests/model/day; waiting seconds won't help)
 - Keep prompts lean (send only current code, tests and last test output, not full history)
-- Fallback provider if limits hit: Groq via `langchain-groq` (`GROQ_API_KEY`); keep the model
-  creation in one `get_llm()` function so switching is a one-line change
 
 ## Roles
 LLM agents:

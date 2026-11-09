@@ -37,6 +37,8 @@ Rules:
 - Each expected value must follow directly from the spec. If the spec is unclear on a
   case, leave that case out rather than guess.
 - Standard library + pytest only; no files, network, randomness or time-dependence.
+- Call the functions with real inputs only: no mocks, no monkeypatching of builtins or
+  other modules.
 - Aim for 8-20 focused tests.
 """
 
@@ -54,9 +56,12 @@ Rules:
 
 The code must also pass a strict linter (ruff). In particular:
 - Imports sorted (stdlib `import x` lines, then `from x import y`), none unused.
+  No `from __future__ import annotations` (not needed on Python 3.11+).
 - Modern type hints: `list[int]`, `dict[str, int]`, `X | None` (not `List`, `Optional`).
 - No unused variables, no bare `except:`, no `except Exception:`.
 - When rejecting a value because of its type (after `isinstance`), raise `TypeError`.
+- No `try`/`except` that only re-raises; use `max()`/`min()` instead of an `if` that
+  just updates a running maximum/minimum.
 - Don't end a function with a bare `return None`; prefer simple, direct code.
 """
 

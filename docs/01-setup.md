@@ -29,8 +29,8 @@ with `.venv\Scripts\Activate.ps1`.
 Create `.env` in the repo root (it is gitignored, so never commit it):
 
 ```
-GOOGLE_API_KEY=...        # required: Gemini, from Google AI Studio
-GROQ_API_KEY=...          # optional: fallback provider if Gemini free-tier limits are hit
+GROQ_API_KEY=...          # required: primary provider (Groq), from console.groq.com
+GOOGLE_API_KEY=...        # optional: Gemini fallback, from Google AI Studio
 ```
 
 ## 4. Checks per step

@@ -60,18 +60,20 @@ back the best attempt it produced.
 - Python 3.11–3.14. **Avoid 3.15 for now:** `zstandard`, which langgraph's dependencies pull in,
   has no prebuilt wheel for it yet, so pip tries to compile it and fails (on Windows with
   *"Microsoft Visual C++ 14.0 or greater is required"*).
-- A free Google AI Studio API key (Gemini). Groq is an optional fallback.
+- A free Groq API key (console.groq.com). A Google AI Studio key (Gemini) is an optional
+  fallback.
 
 ```bash
 python -m venv .venv
 # Windows: .venv\Scripts\activate    macOS/Linux: source .venv/bin/activate
-pip install langgraph langchain-google-genai pytest ruff python-dotenv
+pip install langgraph langchain-google-genai langchain-groq pytest ruff python-dotenv
 ```
 
 Create `.env` in the project root and **never commit it**:
 
 ```
-GOOGLE_API_KEY=your-key-here
+GROQ_API_KEY=your-key-here
+GOOGLE_API_KEY=your-key-here   # optional fallback
 ```
 
 The line must be exactly `NAME=value`: no spaces around `=`, no quotes. A key pasted on its own
@@ -327,8 +329,40 @@ provider or model is a one-line change.
 newest model can also be so overloaded that a one-word reply takes 90 seconds, while an older one
 answers in 3. You'll switch more often than you expect.
 
-**In the project:** `MODEL_NAME` and `get_llm()` in `devteam/agents.py`. Gemini is the default,
-and Groq (`langchain-groq`) is the fallback.
+**In the project:** `PROVIDER`, `MODEL_NAMES` and `get_llm()` in `devteam/agents.py`. Steps 1–4
+were built on Gemini (`gemini-3.5-flash`). From step 5 the primary provider is Groq
+(`openai/gpt-oss-120b`), whose free tier allows far more requests per day, and Gemini is the
+fallback. Only `get_llm()` knows which class it builds; every agent just calls `call_llm()`:
+
+```python
+PROVIDER = "groq"
+MODEL_NAMES = {
+    "groq": "openai/gpt-oss-120b",  # GROQ_API_KEY; large free daily quota
+    "gemini": "gemini-3.5-flash",  # GOOGLE_API_KEY; free tier ~20 requests/model/day
+}
+MODEL_NAME = MODEL_NAMES[PROVIDER]
+
+
+@lru_cache(maxsize=1)
+def get_llm():
+    """Create the chat model once. Switching provider is a change to PROVIDER only."""
+    load_dotenv()  # reads GROQ_API_KEY / GOOGLE_API_KEY from .env
+    if PROVIDER == "groq":
+        return ChatGroq(
+            model=MODEL_NAME,
+            temperature=0.2,
+            reasoning_effort="low",  # gpt-oss reasons before answering; low keeps it fast
+            timeout=120,
+            max_retries=0,
+        )
+    return ChatGoogleGenerativeAI(
+        model=MODEL_NAME, temperature=0.2, thinking_level="low", timeout=120, max_retries=0
+    )
+```
+
+The retry helpers didn't need to change: Groq's rate-limit errors also contain `429`, and its
+daily-limit message says "per day", so `_should_retry` and `_is_daily_quota` classify them the
+same way.
 
 ### 1.16 Role boundaries
 
@@ -729,6 +763,8 @@ Rules:
 - Each expected value must follow directly from the spec. If the spec is unclear on a
   case, leave that case out rather than guess.
 - Standard library + pytest only; no files, network, randomness or time-dependence.
+- Call the functions with real inputs only: no mocks, no monkeypatching of builtins or
+  other modules.
 - Aim for 8-20 focused tests.
 """
 
@@ -979,9 +1015,12 @@ Rules:
 
 The code must also pass a strict linter (ruff). In particular:
 - Imports sorted (stdlib `import x` lines, then `from x import y`), none unused.
+  No `from __future__ import annotations` (not needed on Python 3.11+).
 - Modern type hints: `list[int]`, `dict[str, int]`, `X | None` (not `List`, `Optional`).
 - No unused variables, no bare `except:`, no `except Exception:`.
 - When rejecting a value because of its type (after `isinstance`), raise `TypeError`.
+- No `try`/`except` that only re-raises; use `max()`/`min()` instead of an `if` that
+  just updates a running maximum/minimum.
 - Don't end a function with a bare `return None`; prefer simple, direct code.
 """
 
@@ -1118,6 +1157,16 @@ failure before you blame the coder (see Gotchas). Try tasks 1–4 from
   expected value by hand first. This is the case the `blame="test"` route (step 8) exists for.
 - **The coder may still add a `print` or an `if __name__ == "__main__":` demo.** It's harmless
   for the tests, but the prompt asks for no module-level code, to keep the output predictable.
+- **The test writer can break pytest itself.** One generated test did
+  `monkeypatch.setattr("builtins.int", ...)` to "simulate" an overflow. That replaced `int`
+  for the whole process, pytest crashed with `ValueError: was already stopped`, no summary line
+  was printed, and the score parsed as 0. A score of 0 with a traceback from `_pytest` means
+  "look at the tests", not "the code is broken". The test writer prompt now forbids mocks and
+  monkeypatching.
+- **Models differ in lint discipline.** On Groq's `gpt-oss-120b`, tests passed on 3 of 4 tasks
+  but lint was clean on only about half: unused `typing` imports, `Tuple` instead of `tuple`, a
+  `try`/`except` that only re-raises. Each rule you add to the prompt helps a little; the real
+  fix is the loop in step 6, which feeds `lint_output` back to the coder.
 - **An empty or truncated reply.** If `solution.py` comes back with only a few lines, the request
   may have hit the free-tier output limit or the timeout. Rerun, or look at the raw reply.
 
@@ -1273,7 +1322,16 @@ built for.
 Long, multi-purpose prompts give weaker results and are hard to debug. Separate roles give
 you focused prompts and show you *which* part failed.
 
-### Why Gemini's free tier?
+### Why Groq, and why keep Gemini?
+Both have free tiers, but the daily limits differ a lot. Gemini's free Flash tier can be as low
+as 20 requests per model per day; Groq's free tier for `gpt-oss-120b` is reported at about 1,000
+requests and 200K tokens per day (check console.groq.com for current numbers). A full five-task
+evaluation is roughly 60 calls, so on Gemini's free tier it doesn't fit in one day. "More
+requests" isn't the same as "better code", though: compare pass rates per provider once the CLI
+works (step 9). If you outgrow the free tier, Groq's pay-as-you-go tier for this model costs
+cents for a whole evaluation run.
+
+### Why free tiers at all?
 You can build and experiment for free. The trade-off is rate limits, which is why every call has
 backoff and why prompts stay lean. Check the **daily** limit in AI Studio before a long session:
 it can be as low as 20 requests per model per day, and one graph pass is at least 3 calls (plus 2
@@ -1292,14 +1350,14 @@ malicious code. Only run tasks you wrote yourself, or use containers.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `429` / `RESOURCE_EXHAUSTED` | Free-tier rate limit | Backoff will retry. Wait, or switch to the fallback provider |
-| *"Daily free-tier quota ... is used up"* | Per-day request cap hit (`GenerateRequestsPerDay...`) | Switch `MODEL_NAME` to another model (separate quota), use the fallback provider, or wait for the reset |
-| Model not found | Model ID renamed or retired | Check the current IDs in Google AI Studio and update `MODEL_NAME` |
+| `429` / `RESOURCE_EXHAUSTED` / `rate_limit_exceeded` | Free-tier rate limit | Backoff will retry. Wait, or switch `PROVIDER` to the fallback |
+| *"Daily free-tier quota ... is used up"* | Per-day cap hit (Gemini `GenerateRequestsPerDay...`, Groq "tokens per day (TPD)") | Switch the model in `MODEL_NAMES` (separate quota), switch `PROVIDER`, or wait for the reset |
+| Model not found | Model ID renamed or retired | Check the current IDs (Groq console or Google AI Studio) and update `MODEL_NAMES` |
 | Tests "pass" with 0 tests | Should be impossible here: exit code 5 counts as a failure | Check `run_tests` still compares `returncode == 0` |
 | Every run says `TIMEOUT` | Generated code loops, or a test waits for input | Read `test_output`. The debugger should flag it |
 | `GraphRecursionError` | Your cap is missing or above LangGraph's recursion limit | Check the `iteration` routing, or raise `recursion_limit` |
 | `ModuleNotFoundError: solution` | Tests import a different module name | Tighten the test writer prompt: "import from `solution`" |
-| *"No API key was provided"* | `.env` line isn't `GOOGLE_API_KEY=...` (e.g. key pasted alone) | Fix the line format. Don't print the parsed `.env` to debug it |
+| *"No API key was provided"* / `GROQ_API_KEY` missing | `.env` line isn't `NAME=...` for the active provider (e.g. key pasted alone) | Fix the line format. Don't print the parsed `.env` to debug it |
 | A call takes minutes, or `504 DEADLINE_EXCEEDED` | The model is overloaded, or thinking at a high level | Use `thinking_level="low"`; time a one-word prompt on other Flash models and switch `MODEL_NAME` |
 | `503 UNAVAILABLE` ("high demand") | Temporary model overload | Backoff retries it. If it keeps happening, switch model |
 | `UnicodeEncodeError` when printing | Windows console isn't UTF-8 | Run `python -X utf8 ...` or set `PYTHONUTF8=1` |
@@ -1337,6 +1395,8 @@ Quick definitions. See [Part 1](#part-1-core-concepts) for the full explanations
 | **User message** | The per-run part of a prompt: this task, this spec. |
 | **Spec** | The architect's written contract that both the tests and the code are built from. |
 | **Thinking level** | How much hidden reasoning a Gemini 3 model does before answering. Lower is faster. |
+| **Reasoning effort** | The same idea for reasoning models such as gpt-oss on Groq (`reasoning_effort="low"`). |
+| **Provider** | The company/API serving the model (Groq, Gemini). Chosen in one place, `PROVIDER`. |
 | **Retry input** | What the coder gets on a later attempt: spec + previous code + diagnosis + the tail of the check output. |
 | **Coding to the tests** | Special-casing expected values instead of implementing the behaviour. This is why the coder never sees the test file. |
 | **Code fence** | The ```` ``` ```` markers models wrap code in. They must be stripped before writing a `.py` file. |
