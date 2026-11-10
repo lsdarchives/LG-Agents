@@ -82,7 +82,8 @@ devteam/
   team_graph.py             # supervisor graph, subgraphs, checkpointer (v1 owns graph.py)
   events.py                 # events.jsonl writer + live stream (office view)
 checks/                     # offline pytest checks + live `python -m checks.phaseNN`
-main.py                     # python main.py "build a ..." [--approve-plan] [--trace]
+main.py                     # v1 single-file coding CLI
+devteam/team_graph.py       # v2 planning CLI, including --approve-plan <run_id>
 workspace/<run_id>/         # generated project + .devteam/ artifacts (gitignored)
 ```
 
@@ -93,11 +94,12 @@ class TeamState(TypedDict):
     messages: Annotated[list, add_messages]          # audit log only, not shared context
     artifacts: Annotated[dict[str, str], merge_dicts] # name -> path
     task_board: Annotated[list[Task], merge_tasks]    # by id; status todo|in_progress|done|failed
+    plan_approved: bool
     current_task: str | None
     last_result: dict                                  # status, summary, questions, handoff_notes
     review_rounds: int
     steps_used: int
-    status: str                                        # running|done|partial|failed
+    status: str                                        # running|awaiting_approval|done|partial|failed
 ```
 
 ## Tools (agent-computer interface)
@@ -150,6 +152,7 @@ free, permissively licensed office tileset); not a copy of any existing game.
   | `tests` | passed, failed |
   | `blocked` | questions |
   | `result` | status, summary, tokens |
+  | `approval` | status (requested/approved/rejected), task_count, reason |
   | `finish` | status, reason |
   The same events are emitted live via LangGraph's `get_stream_writer()` / `stream_mode="custom"`.
 - **Rooms.** Leadership office (tech_lead), planning room with a whiteboard (the task board), build
@@ -159,12 +162,11 @@ free, permissively licensed office tileset); not a copy of any existing game.
   a walk to the owner of the answer. tests failed: a bug sprite on the desk, the debugger visits.
   review: reviewers meet in the meeting room and return with ✅/🔴. Idle: coffee machine.
 - **Game layer.** Per-agent stats (tasks done, fix loops, tokens, first-try streak); budget as an
-  energy/clock bar; click a desk to read the agent's artifacts; you appear as the client, and plan
-  approval happens in the meeting room.
+  energy/clock bar; click a desk to read the agent's artifacts; plan approval is a future meeting-room action.
 - **Files.** `office/index.html`, `office/main.js` (Phaser 3, exact version from cdnjs),
   `office/assets/`, `office/sample-events.jsonl` (for building the UI without LLM calls);
   `devteam/events.py`; `server.py` (live mode only).
-- **Modes.** Replay (open a run's events.jsonl, works offline) first; live (WebSocket) from step 15.
+- **Modes.** Replay (open a run's events.jsonl, works offline) first; live (WebSocket) is planned after CLI approval.
 
 ## Build order (commit after each; check before moving on)
 11. **Registry + builder.** Load agents.yaml, validate, build 3 agents without tools.
@@ -179,10 +181,9 @@ free, permissively licensed office tileset); not a copy of any existing game.
 14b. **Office replay viewer** (`office/`, Phaser 3): rooms per team, avatars at desks, pathfinding
     between desks, speech/thought bubbles, playback controls (play/pause/speed/scrub).
     Check: replaying the step 14 run's events.jsonl shows every handoff as a walk + bubble.
-15. **Human approval with interrupt()** after the task board (`--approve-plan`).
-    Live office: `server.py` (FastAPI WebSocket) streams events while the graph runs, and the
-    meeting room's "Approve plan" button resumes the interrupt().
-    Check: run pauses, you approve or edit (CLI or office), it continues.
+15. **Human approval with interrupt()** after the task board (`--approve-plan <run_id>`).
+    Check: run pauses, you approve, reject, or edit the saved JSON task board from the CLI, and the
+    checkpoint resumes with the approved plan. A future office server can call the same resume API.
 16. **One builder + per-task quality loop** (test_engineer, backend_dev, qa_runner, debugger).
     Check: a 3-task backend app goes green task by task.
 17. **All builders + domain advisors.** Check: Tech Lead picks the right advisor/builder.

@@ -1683,9 +1683,9 @@ validated tool calls, structured handoffs, and bounded supervisor loops.
 handoff carries four fields: a concrete objective, the artifacts or files to read, the expected
 output, and boundaries. The graph exposes only the planning agent responsible for the next missing
 artifact; `FINISH` is available when planning is complete or blocked. The tool rejects an unknown
-or currently unavailable target, and a worker handoff missing its objective, output or boundaries. If the model omits
-the input list, the tool fills it from that agent's configured reads. Workers receive the handoff
-as a `handoff` input alongside the artifacts listed in their own `reads` field.
+or currently unavailable target, and a worker handoff missing its objective, output or boundaries.
+If the model omits the input list, the tool fills it from that agent's configured reads. Workers
+receive the handoff as a `handoff` input alongside the artifacts listed in their own `reads` field.
 
 The builder records a successful handoff as an event and returns its validated decision to the
 graph node. This keeps routing in the graph layer: the model cannot directly call arbitrary Python
@@ -1708,7 +1708,8 @@ manager edges. The graph checks for completed artifacts before calling the Tech 
 avoids an extra model call to finish. A run stops as partial if a planner is blocked, the Tech Lead
 fails to make a valid route, or the run reaches `MAX_ACTIVATIONS`. The handoff builder accepts only
 one route per activation. Normal runs still use the step 13 SQLite checkpointer, so a resumed run
-restores both its route and handoff state.
+restores both its route and handoff state. After the task board is complete, Step 15 routes to the
+approval interrupt before `finish`; blocked planning still finishes as partial.
 
 #### Check the phase
 
@@ -1721,14 +1722,14 @@ Run the offline checks, including a deterministic graph run, then a live plannin
 ```
 
 The deterministic check verifies the graph's `Command` routes without an API call. The live check
-expects `product_manager → architect → project_manager → finish`, one run of each planning agent, a
-done status, and the `prd`, `design`, and `tasks.json` artifacts. It also checks that each handoff
-event is followed by the selected agent with the same objective. The log is saved to
+expects `product_manager → architect → project_manager → approval`, one run of each planning agent,
+an approved done status, and the `prd`, `design`, and `tasks.json` artifacts. It also checks that
+each planning handoff is followed by the selected agent with the same objective. The log is saved to
 `runs/<run_id>/events.jsonl`; the corresponding artifacts are in `workspace/<run_id>/.devteam/`.
 
 **Try it:** run `.venv\Scripts\python -m devteam.team_graph "Build a tiny URL shortener API"` and
-watch the Tech Lead's route and each agent result. Resume a stopped run with
-`.venv\Scripts\python -m devteam.team_graph --resume <run_id>`.
+watch the Tech Lead's route and each agent result. Planning pauses for review; approve it with
+`--approve-plan <run_id>`. Use `--resume <run_id>` only for a killed or crashed run.
 
 **Check yourself:**
 
@@ -1742,11 +1743,59 @@ watch the Tech Lead's route and each agent result. Resume a stopped run with
   ends the run as partial.
 - **Keep the phase boundary explicit.** The domain advisors and implementation agents are not
   routable yet. Later steps expand the allowed target set as those teams are built.
-- **Events are the replay interface.** This phase records `handoff` and `activate` events; the
-  office viewer planned for a later step can animate those events without running the graph again.
+- **Events are the replay interface.** This phase records `handoff`, `activate`, and `approval`
+  events; the office viewer planned for a later step can animate those events without rerunning the graph.
 
 ### Step 15: Human approval with interrupt()
-_Written when the step is built._
+
+**Goal:** pause a completed planning run so a person can review and edit its task board before the
+team proceeds. Step 16's builders will only run after the plan is approved.
+
+#### Pause and resume
+
+After `project_manager` writes `tasks.json`, the Tech Lead routes to an `approval` node. The node
+uses LangGraph `interrupt()` to surface the request, task board, and artifact path. The SQLite
+checkpointer saves the run with status `awaiting_approval`; no model call is needed to approve or
+reject it. The event log records the request and the final decision.
+
+Start a plan from PowerShell:
+
+```powershell
+.venv\Scripts\python -m devteam.team_graph "Build a tiny URL shortener API"
+```
+
+When it pauses, review `workspace/<run_id>/.devteam/tasks.json`. You may edit the JSON to add,
+remove, reorder, or revise tasks. The approval step checks that the board is a non-empty array with
+unique task IDs, titles, and valid dependency IDs. Then resume with either:
+
+```powershell
+.venv\Scripts\python -m devteam.team_graph --approve-plan <run_id>
+.venv\Scripts\python -m devteam.team_graph --reject-plan <run_id>
+```
+
+Approval loads the latest file contents, so edits made before resuming become the graph's task
+board. Rejection ends the run as partial. `--resume` remains for killed or crashed runs and does not
+bypass a pending approval. The same `Command(resume=...)` interface can later be called by the
+office server's approval button.
+
+**Try it:** approve one generated plan unchanged, then start another run, edit its task JSON and
+approve it; verify the resulting run state and events include the approved board. Reject a third
+plan and confirm it ends with a partial status.
+
+**Check yourself:**
+
+1. Why does the approval node read the task file again when it resumes?
+2. What keeps `--resume` from accidentally treating a pause as approval?
+3. How does the reducer remove a task that a person deleted from the JSON file?
+
+**Gotchas:**
+
+- **The checkpoint stores the pause.** Restarting the process does not restart the LLM planning
+  agents; `--approve-plan` resumes the saved interrupt.
+- **Approval is explicit.** Editing `tasks.json` alone does not start builders or mark the plan
+  approved.
+- **The event stream is UI-ready.** The approval event gives a future office view a clear pause and
+  decision to display.
 
 ### Step 16: One builder and the per-task quality loop
 _Written when the step is built._
@@ -1817,5 +1866,5 @@ without importing any engine code.
 - **TeamState:** the v2 graph state shared by every node, with reducers on multi-writer fields.
 - **Checkpoint:** a saved copy of the graph state after a node; the basis of resume and human approval.
 - **Thread id:** the key a checkpointer stores a run under; in DevTeam it's the run id.
-- **Event:** one line of a run's events.jsonl (activate, handoff, tool_call, artifact_written, tests, blocked, result, finish).
+- **Event:** one line of a run's events.jsonl (activate, handoff, tool_call, artifact_written, tests, blocked, result, approval, finish).
 - **Output contract:** the rule that an agent's `writes` must exist before its "done" is accepted.

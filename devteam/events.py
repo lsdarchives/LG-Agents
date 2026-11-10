@@ -75,8 +75,15 @@ class Finish(_Event):
     reason: str = ""
 
 
+class Approval(_Event):
+    type: Literal["approval"] = "approval"
+    status: Literal["requested", "approved", "rejected"]
+    task_count: int
+    reason: str = ""
+
+
 Event = Annotated[
-    Activate | Handoff | ToolCall | ArtifactWritten | Tests | Blocked | Result | Finish,
+    Activate | Handoff | ToolCall | ArtifactWritten | Tests | Blocked | Result | Finish | Approval,
     Field(discriminator="type"),
 ]
 EVENT_ADAPTER = TypeAdapter(Event)

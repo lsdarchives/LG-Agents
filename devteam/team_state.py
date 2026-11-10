@@ -19,6 +19,7 @@ class Task(TypedDict, total=False):
     depends_on: list[str]
     acceptance: list[str]
     status: Literal["todo", "in_progress", "done", "failed"]
+    _delete: bool  # internal reducer marker used when a human removes a task from the plan
 
 
 def merge_dicts(old: dict[str, str] | None, new: dict[str, str] | None) -> dict[str, str]:
@@ -31,6 +32,9 @@ def merge_tasks(old: list[Task] | None, new: list[Task] | None) -> list[Task]:
     new ids are appended in order. Two parallel builders can each update their own task."""
     merged: dict[str, Task] = {t["id"]: dict(t) for t in (old or [])}
     for task in new or []:
+        if task.get("_delete"):
+            merged.pop(task["id"], None)
+            continue
         merged[task["id"]] = {**merged.get(task["id"], {}), **task}
     return list(merged.values())
 
@@ -46,7 +50,8 @@ class TeamState(TypedDict):
     last_result: dict  # last agent's result block + its name
     activations: Annotated[int, operator.add]  # each node returns 1; the reducer sums
     review_rounds: int
-    status: Literal["running", "done", "partial", "failed"]
+    status: Literal["running", "awaiting_approval", "done", "partial", "failed"]
+    plan_approved: bool
     reason: str
 
 
@@ -63,5 +68,6 @@ def initial_team_state(request: str, run_id: str) -> TeamState:
         "activations": 0,
         "review_rounds": 0,
         "status": "running",
+        "plan_approved": False,
         "reason": "",
     }
