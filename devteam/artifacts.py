@@ -14,9 +14,10 @@ import yaml
 from devteam.config import MAX_ACTIVATIONS, STACKS_FILE
 from devteam.team_state import TeamState
 from devteam.toolbox import ToolError, Workspace
+from devteam.toolbox.workspace import ARTIFACT_ALIASES
 
 # A `reads`/`writes` name whose artifact file is named differently.
-ALIASES = {"task_board": "tasks.json"}
+ALIASES = ARTIFACT_ALIASES
 
 
 def artifact_index(ws: Workspace) -> str:

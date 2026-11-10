@@ -12,7 +12,7 @@ Claude Code loads it automatically. Everything else is here.
 | 03 | [03-tasks.md](03-tasks.md) | The 5 test tasks the dev team is evaluated on | Done |
 | 04 | [04-results.md](04-results.md) | Iterations and pass rate per test task | Done (v1 run 2026-11-09) |
 | 05 | [05-tracing.md](05-tracing.md) | MLflow setup and how to read the traces | Done (optional step 10) |
-| 06 | [06-v2-guide.md](06-v2-guide.md) | The v2 guide: from a coding loop to an autonomous team (agent registry, supervisor, tools, artifacts), a walkthrough per step from 11 | Steps 11-13 written; updated after each v2 step |
+| 06 | [06-v2-guide.md](06-v2-guide.md) | The v2 guide: from a coding loop to an autonomous team (agent registry, supervisor, tools, artifacts), a walkthrough per step from 11 | Steps 11-14 written; updated after each v2 step |
 
 `LEARNING.md` keeps a plain, unnumbered name so it can be shared on its own as a standalone guide.
 

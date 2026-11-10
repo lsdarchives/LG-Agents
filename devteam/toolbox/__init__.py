@@ -5,6 +5,8 @@ workspace. A refused request (ToolError) or bad arguments come back to the agent
 "ERROR: ..." reply it can read and react to, instead of crashing the run.
 """
 
+import json
+
 from langchain_core.tools import BaseTool, StructuredTool
 
 from devteam.toolbox.workspace import ToolError, Workspace
@@ -18,7 +20,9 @@ def _bad_args_text(exc: Exception) -> str:
     return f"ERROR: invalid arguments: {exc}"
 
 
-def workspace_tools(ws: Workspace) -> dict[str, BaseTool]:
+def workspace_tools(
+    ws: Workspace, handoff_targets: dict[str, list[str]] | list[str] | None = None
+) -> dict[str, BaseTool]:
     """All workspace tools, bound to `ws`, keyed by the names agents.yaml uses."""
 
     def list_tree(depth: int = 3) -> str:
@@ -51,6 +55,41 @@ def workspace_tools(ws: Workspace) -> dict[str, BaseTool]:
         return ws.read_artifact(name)
 
     fns = [list_tree, view_file, search_files, create_file, edit_file, write_artifact, read_artifact]
+    if handoff_targets is not None:
+        allowed = set(handoff_targets)
+        target_reads = handoff_targets if isinstance(handoff_targets, dict) else {}
+        allow_finish = not isinstance(handoff_targets, dict) or "FINISH" in handoff_targets
+
+        def handoff(
+            target: str,
+            objective: str,
+            inputs: str = "",
+            output: str = "",
+            boundaries: str = "",
+        ) -> str:
+            """Route to one planning agent or finish; include the delegated work contract."""
+            target = "FINISH" if target.strip().lower() == "finish" else target.strip()
+            if target == "FINISH" and not allow_finish:
+                raise ToolError("FINISH is available only when planning is complete or blocked")
+            if target != "FINISH" and target not in allowed:
+                raise ToolError(f"target must be one of {sorted(allowed)}")
+            if not objective.strip():
+                raise ToolError("objective must not be empty")
+            delegation = {
+                "inputs": inputs.strip() or ", ".join(target_reads.get(target, [])),
+                "output": output.strip(),
+                "boundaries": boundaries.strip(),
+            }
+            if target != "FINISH" and (
+                not delegation["inputs"] or not delegation["output"] or not delegation["boundaries"]
+            ):
+                raise ToolError("agent handoffs require output and boundaries; inputs come from the agent reads")
+            return json.dumps(
+                {"accepted": True, "target": target, "objective": objective.strip(), **delegation},
+                ensure_ascii=False,
+            )
+
+        fns.append(handoff)
     return {
         fn.__name__: StructuredTool.from_function(
             func=fn,
@@ -63,9 +102,13 @@ def workspace_tools(ws: Workspace) -> dict[str, BaseTool]:
     }
 
 
-def make_tools(ws: Workspace, names: list[str]) -> tuple[list[BaseTool], list[str]]:
+def make_tools(
+    ws: Workspace,
+    names: list[str],
+    handoff_targets: dict[str, list[str]] | list[str] | None = None,
+) -> tuple[list[BaseTool], list[str]]:
     """Return (tools for `names` that exist, names not implemented yet)."""
-    available = workspace_tools(ws)
+    available = workspace_tools(ws, handoff_targets)
     tools = [available[n] for n in names if n in available]
     missing = [n for n in names if n not in available]
     return tools, missing

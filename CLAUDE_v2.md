@@ -175,7 +175,7 @@ free, permissively licensed office tileset); not a copy of any existing game.
     `runs/<id>/events.jsonl`, see Office view). Check: kill a run midway and resume it; the run's
     events.jsonl validates against the event types.
 14. **Tech Lead supervisor (handoff → Command).** Planning team only.
-    Check: request → prd, domain_notes, design, tasks.json; log every routing decision.
+    Check: request → prd, design, tasks.json; log every routing decision.
 14b. **Office replay viewer** (`office/`, Phaser 3): rooms per team, avatars at desks, pathfinding
     between desks, speech/thought bubbles, playback controls (play/pause/speed/scrub).
     Check: replaying the step 14 run's events.jsonl shows every handoff as a walk + bubble.

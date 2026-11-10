@@ -1668,7 +1668,82 @@ Expected: the run is killed after two agents (`killed=True`), resume continues a
 ---
 
 ### Step 14: Tech Lead supervisor (handoff → Command)
-_Written when the step is built._
+
+**Goal:** replace the fixed planning chain with a Tech Lead that chooses which planning agent runs
+next. For this phase, routing is limited to `product_manager`, `architect`, and `project_manager`.
+The graph only exposes the role that owns the next missing artifact, and sends the run to `FINISH`
+when planning is complete or a planning agent is blocked.
+
+**Concepts:** [LangGraph `Command`](https://langchain-ai.github.io/langgraph/concepts/low_level/#command),
+validated tool calls, structured handoffs, and bounded supervisor loops.
+
+#### The handoff contract
+
+`agents.yaml` gives the Tech Lead the `handoff` tool and tells it to select one target. Each agent
+handoff carries four fields: a concrete objective, the artifacts or files to read, the expected
+output, and boundaries. The graph exposes only the planning agent responsible for the next missing
+artifact; `FINISH` is available when planning is complete or blocked. The tool rejects an unknown
+or currently unavailable target, and a worker handoff missing its objective, output or boundaries. If the model omits
+the input list, the tool fills it from that agent's configured reads. Workers receive the handoff
+as a `handoff` input alongside the artifacts listed in their own `reads` field.
+
+The builder records a successful handoff as an event and returns its validated decision to the
+graph node. This keeps routing in the graph layer: the model cannot directly call arbitrary Python
+or jump to agents outside this phase.
+
+#### Route with `Command`
+
+`TeamState` now holds the current handoff. The graph starts at `tech_lead`; each planning agent
+returns to it after producing its artifact. The Tech Lead node returns a `Command` that both stores
+the handoff and names the next node:
+
+```python
+if decision["target"] == "FINISH":
+    return Command(goto="finish", update={**update, "handoff": None})
+return Command(goto=decision["target"], update={**update, "handoff": decision})
+```
+
+That creates a supervisor loop instead of the former fixed product-manager → architect → project-
+manager edges. The graph checks for completed artifacts before calling the Tech Lead again; this
+avoids an extra model call to finish. A run stops as partial if a planner is blocked, the Tech Lead
+fails to make a valid route, or the run reaches `MAX_ACTIVATIONS`. The handoff builder accepts only
+one route per activation. Normal runs still use the step 13 SQLite checkpointer, so a resumed run
+restores both its route and handoff state.
+
+#### Check the phase
+
+Run the offline checks, including a deterministic graph run, then a live planning run (requires
+`.env` and provider quota):
+
+```powershell
+.venv\Scripts\python -m pytest checks -q
+.venv\Scripts\python -X utf8 -m checks.phase03
+```
+
+The deterministic check verifies the graph's `Command` routes without an API call. The live check
+expects `product_manager → architect → project_manager → finish`, one run of each planning agent, a
+done status, and the `prd`, `design`, and `tasks.json` artifacts. It also checks that each handoff
+event is followed by the selected agent with the same objective. The log is saved to
+`runs/<run_id>/events.jsonl`; the corresponding artifacts are in `workspace/<run_id>/.devteam/`.
+
+**Try it:** run `.venv\Scripts\python -m devteam.team_graph "Build a tiny URL shortener API"` and
+watch the Tech Lead's route and each agent result. Resume a stopped run with
+`.venv\Scripts\python -m devteam.team_graph --resume <run_id>`.
+
+**Check yourself:**
+
+1. Why does the handoff tool validate its target before the node returns `Command`?
+2. Which part of the route survives a process restart: the event log, the checkpoint, or both?
+3. What should happen if the model returns a result but never calls `handoff`?
+
+**Gotchas:**
+
+- **A result is not a route.** The Tech Lead must call the validated tool; a result block by itself
+  ends the run as partial.
+- **Keep the phase boundary explicit.** The domain advisors and implementation agents are not
+  routable yet. Later steps expand the allowed target set as those teams are built.
+- **Events are the replay interface.** This phase records `handoff` and `activate` events; the
+  office viewer planned for a later step can animate those events without running the graph again.
 
 ### Step 15: Human approval with interrupt()
 _Written when the step is built._

@@ -16,6 +16,7 @@ MAX_OUTPUT_CHARS = 6000  # cap on any single tool reply
 ARTIFACT_DIR = ".devteam"  # team documents (prd, design, ...) live here, not in the project tree
 SKIP_DIRS = {ARTIFACT_DIR, ".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache", ".ruff_cache"}
 ARTIFACT_NAME = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
+ARTIFACT_ALIASES = {"task_board": "tasks.json"}
 NO_OUTPUT = "Command ran successfully with no output."
 
 
@@ -152,6 +153,10 @@ class Workspace:
     # ── artifacts ─────────────────────────────────────────────────────────────
     def _artifact_path(self, name: str) -> Path:
         name = name.strip().lower()
+        for alias, canonical in ARTIFACT_ALIASES.items():
+            if name in {alias, f"{alias}.md"}:
+                name = canonical
+                break
         if not ARTIFACT_NAME.match(name):
             raise ToolError(f"artifact name {name!r} must be lowercase letters, digits, '_', '-' or '.'")
         if "." not in name:

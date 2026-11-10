@@ -9,7 +9,7 @@ import json
 from collections.abc import Callable
 from typing import Literal
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel, ValidationError
 
 from devteam.artifacts import ALIASES
@@ -24,8 +24,10 @@ BUDGET_NOTE = (
     "Reply now with your final answer, ending with the result block."
 )
 OUTPUTS_NOTE = (
-    "You reported done, but these outputs were never saved: {missing}. Nothing exists until a tool "
-    "call saves it. Call write_artifact for each one now, then reply with the result block."
+    "You reported done, but these outputs were never saved under their required artifact names: "
+    "{missing}. Nothing exists until write_artifact saves each exact name. For .json outputs, pass "
+    "raw valid JSON with no Markdown fences. Call write_artifact for each missing output now, then "
+    "reply with the result block."
 )
 REPAIR_NOTE = (
     "Your reply did not end with a valid result block. Reply again with only the result block: "
@@ -97,7 +99,11 @@ def _short(args: dict, limit: int = 80) -> str:
     return line if len(line) <= limit else line[: limit - 3] + "..."
 
 
-def build_agent(spec: AgentSpec, shared_rules: str) -> Callable[..., dict]:
+def build_agent(
+    spec: AgentSpec,
+    shared_rules: str,
+    handoff_targets: dict[str, list[str]] | list[str] | None = None,
+) -> Callable[..., dict]:
     """Return agent(inputs, workspace, events=None, objective=None)
     -> {"result", "raw", "steps", "tool_calls", "tokens"}."""
     if spec.kind == "tool":
@@ -110,7 +116,7 @@ def build_agent(spec: AgentSpec, shared_rules: str) -> Callable[..., dict]:
         events: EventLog | None = None,
         objective: str | None = None,
     ) -> dict:
-        tools, missing = make_tools(workspace, spec.tools)
+        tools, missing = make_tools(workspace, spec.tools, handoff_targets)
         by_name = {t.name: t for t in tools}
         plain = get_llm(spec.model_tier)
         model = plain.bind_tools(tools) if tools else plain
@@ -121,6 +127,7 @@ def build_agent(spec: AgentSpec, shared_rules: str) -> Callable[..., dict]:
 
         messages = [SystemMessage(system), HumanMessage(render_inputs(spec, inputs))]
         tool_calls: list[dict] = []
+        routing_decision: dict | None = None
         steps = 0
         tokens = 0
 
@@ -135,7 +142,7 @@ def build_agent(spec: AgentSpec, shared_rules: str) -> Callable[..., dict]:
 
         def tool_loop(reply):
             """Run tool rounds until the model answers without tools or the budget is used up."""
-            nonlocal steps
+            nonlocal steps, routing_decision
             while reply.tool_calls:
                 if steps >= limit:
                     for call in reply.tool_calls:  # every tool call needs an answer before the next turn
@@ -143,9 +150,15 @@ def build_agent(spec: AgentSpec, shared_rules: str) -> Callable[..., dict]:
                     messages.append(HumanMessage(BUDGET_NOTE))
                     return ask(plain)
                 steps += 1
+                accepted_route = False
                 for call in reply.tool_calls:
                     tool = by_name.get(call["name"])
-                    if tool is None:
+                    if call["name"] == "handoff" and routing_decision is not None:
+                        out = ToolMessage(
+                            "ERROR: one handoff was already accepted for this activation",
+                            tool_call_id=call["id"],
+                        )
+                    elif tool is None:
                         out = ToolMessage(
                             f"ERROR: unknown tool {call['name']!r}; you have {list(by_name)}",
                             tool_call_id=call["id"],
@@ -158,7 +171,36 @@ def build_agent(spec: AgentSpec, shared_rules: str) -> Callable[..., dict]:
                     emit("tool_call", agent=spec.name, tool=call["name"], arg=_short(call["args"], 60))
                     if call["name"] == "write_artifact" and first.startswith("Saved artifact"):
                         emit("artifact_written", agent=spec.name, name=str(call["args"].get("name", "")))
+                    if call["name"] == "handoff":
+                        try:
+                            decision = json.loads(str(out.content))
+                        except (TypeError, json.JSONDecodeError):
+                            decision = {}
+                        if decision.get("accepted"):
+                            routing_decision = {k: v for k, v in decision.items() if k != "accepted"}
+                            accepted_route = True
+                            target = "finish" if decision["target"] == "FINISH" else decision["target"]
+                            emit(
+                                "handoff",
+                                **{"from": spec.name},
+                                to=target,
+                                objective=decision["objective"],
+                            )
                     messages.append(out)
+                if accepted_route:
+                    return AIMessage(
+                        content=json.dumps(
+                            {
+                                "status": "done",
+                                "summary": (
+                                    f"Routed to {routing_decision['target']}: "
+                                    f"{routing_decision['objective']}"
+                                ),
+                                "questions": [],
+                                "handoff_notes": [],
+                            }
+                        )
+                    )
                 reply = ask(model, set(by_name))
             return reply
 
@@ -190,7 +232,14 @@ def build_agent(spec: AgentSpec, shared_rules: str) -> Callable[..., dict]:
         if result.status == "blocked":
             emit("blocked", agent=spec.name, questions=result.questions)
         emit("result", agent=spec.name, status=result.status, summary=result.summary, steps=steps, tokens=tokens)
-        return {"result": result, "raw": raw, "steps": steps, "tool_calls": tool_calls, "tokens": tokens}
+        return {
+            "result": result,
+            "raw": raw,
+            "steps": steps,
+            "tool_calls": tool_calls,
+            "tokens": tokens,
+            "handoff": routing_decision,
+        }
 
     agent.__name__ = spec.name
     return agent

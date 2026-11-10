@@ -42,6 +42,7 @@ class TeamState(TypedDict):
     artifacts: Annotated[dict[str, str], merge_dicts]  # artifact name -> path in the workspace
     task_board: Annotated[list[Task], merge_tasks]
     current_task: str | None
+    handoff: dict | None  # objective, inputs, output and boundaries for the current assignment
     last_result: dict  # last agent's result block + its name
     activations: Annotated[int, operator.add]  # each node returns 1; the reducer sums
     review_rounds: int
@@ -57,6 +58,7 @@ def initial_team_state(request: str, run_id: str) -> TeamState:
         "artifacts": {},
         "task_board": [],
         "current_task": None,
+        "handoff": None,
         "last_result": {},
         "activations": 0,
         "review_rounds": 0,

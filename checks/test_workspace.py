@@ -82,6 +82,14 @@ def test_artifacts_roundtrip(ws):
         ws.read_artifact("design")
 
 
+def test_task_board_alias_is_saved_as_json(ws):
+    content = '[{"id":"T1","title":"A task"}]'
+    ws.write_artifact("task_board", content)
+    ws.write_artifact("task_board.md", content)
+    assert ws.read_artifact("tasks.json") == ws.read_artifact("task_board")
+    assert ws.artifacts() == {"tasks": ".devteam/tasks.json"}
+
+
 def test_langchain_tools_return_errors_as_text(ws):
     tools, missing = make_tools(ws, ["create_file", "run_tests"])
     assert [t.name for t in tools] == ["create_file"] and missing == ["run_tests"]
