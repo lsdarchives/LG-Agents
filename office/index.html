@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>DevTeam Office Replay</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/phaser/3.80.1/phaser.min.js" defer></script>
+    <script src="main.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">DEVTEAM / MILESTONE A</p>
+          <h1>Office replay</h1>
+          <p class="intro">Watch a run move between rooms, agents, and artifacts.</p>
+        </div>
+        <div class="load-controls">
+          <button id="sample-button" class="secondary">Load sample</button>
+          <label class="file-button" for="event-file">Open events.jsonl</label>
+          <input id="event-file" type="file" accept=".jsonl,.json,application/json,text/plain">
+        </div>
+      </header>
+
+      <section class="player" aria-label="Replay controls">
+        <button id="play-button" class="primary" disabled>Play</button>
+        <button id="pause-button" class="secondary" disabled>Pause</button>
+        <label class="speed-control">Speed
+          <select id="speed-select" disabled>
+            <option value="0.5">0.5×</option>
+            <option value="1" selected>1×</option>
+            <option value="2">2×</option>
+            <option value="4">4×</option>
+          </select>
+        </label>
+        <input id="timeline" type="range" min="0" max="0" value="0" disabled aria-label="Replay timeline">
+        <span id="event-count" class="event-count">No run loaded</span>
+      </section>
+
+      <section id="office-frame" aria-label="Office scene">
+        <div id="office-canvas"></div>
+      </section>
+      <section class="event-card" aria-live="polite">
+        <span id="event-kind" class="event-kind">READY</span>
+        <p id="event-caption">Load a run log or the sample to begin.</p>
+      </section>
+      <footer>Run logs stay on your machine. Replay works without an API key.</footer>
+    </main>
+  </body>
+</html>

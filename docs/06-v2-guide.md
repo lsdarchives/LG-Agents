@@ -1746,6 +1746,37 @@ watch the Tech Lead's route and each agent result. Planning pauses for review; a
 - **Events are the replay interface.** This phase records `handoff`, `activate`, and `approval`
   events; the office viewer planned for a later step can animate those events without rerunning the graph.
 
+### Step 14b: Office replay viewer
+
+**Goal:** watch a saved run without making more model calls. The Phaser page is a viewer over
+`events.jsonl`; it does not run agents or modify a workspace.
+
+The UI builds the rooms, desks, and avatars from code. It creates avatars only for agents named in
+the loaded run, places them in leadership, planning, build, quality, or ops, and routes handoffs over
+a grid that avoids desks. Bubbles show assignments, tool calls, results, and approval events.
+
+Open `office/index.html`, choose **Load sample**, then try **Open events.jsonl** with a file from
+`runs/<run_id>/events.jsonl`. Use play, pause, speed, and the timeline to replay it. If the browser
+blocks loading the sample while opening the file directly, serve the folder locally:
+
+```powershell
+cd office
+python -m http.server 8000
+```
+
+Then open `http://localhost:8000`. Phaser 3.80.1 is pinned in the page and loaded from cdnjs.
+
+**Check the phase:** load `sample-events.jsonl`, scrub across the three planning handoffs, and verify
+the Tech Lead walks to each selected agent while the objective appears in a bubble. Load a real
+`events.jsonl` from a previous run and confirm only its participating agents appear.
+
+**Gotchas:**
+
+- **Replay is read-only.** A replay shows past events; it cannot resume or change the run.
+- **Local file access varies by browser.** Use the file picker for a real event log; serve the folder
+  over localhost if the sample fetch is blocked.
+- **The scene is generated from events.** An agent absent from the log has no avatar in that replay.
+
 ### Step 15: Human approval with interrupt()
 
 **Goal:** pause a completed planning run so a person can review and edit its task board before the

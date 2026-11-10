@@ -1,0 +1,84 @@
+:root {
+  color-scheme: dark;
+  font-family: "Segoe UI", sans-serif;
+  background: #111722;
+  color: #e9eef6;
+  font-synthesis: none;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-width: 360px;
+  background: radial-gradient(ellipse at 50% -20%, #26364a, #111722 62%);
+}
+
+main {
+  width: min(1320px, calc(100% - 36px));
+  margin: 0 auto;
+  padding: 28px 0 24px;
+}
+
+.topbar, .player, .event-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.topbar { justify-content: space-between; margin-bottom: 20px; }
+.eyebrow { margin: 0 0 6px; color: #8ed9c6; font-size: 11px; letter-spacing: .16em; font-weight: 700; }
+h1 { margin: 0; font-size: clamp(26px, 4vw, 38px); letter-spacing: -.03em; }
+.intro { margin: 6px 0 0; color: #aab6c7; }
+.load-controls { display: flex; gap: 10px; align-items: center; }
+button, .file-button, select {
+  border: 1px solid #40516a;
+  border-radius: 8px;
+  padding: 9px 13px;
+  background: #202b3b;
+  color: #e9eef6;
+  font: inherit;
+}
+button, .file-button { cursor: pointer; }
+button:disabled, select:disabled { opacity: .45; cursor: not-allowed; }
+button.primary { border-color: #48b89e; background: #16735f; font-weight: 700; }
+.file-button:hover, button:not(:disabled):hover { filter: brightness(1.15); }
+#event-file { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
+
+.player {
+  min-height: 60px;
+  padding: 10px 12px;
+  border: 1px solid #28374a;
+  border-radius: 11px 11px 0 0;
+  background: #192332;
+}
+.speed-control { display: flex; align-items: center; gap: 8px; color: #aab6c7; white-space: nowrap; }
+.speed-control select { padding: 7px 9px; }
+#timeline { width: 100%; accent-color: #58c7ad; }
+.event-count { min-width: 112px; color: #aab6c7; text-align: right; font-variant-numeric: tabular-nums; }
+
+#office-frame { overflow: hidden; border: 1px solid #28374a; border-top: 0; background: #151e2a; }
+#office-canvas { width: 100%; aspect-ratio: 5 / 3; }
+#office-canvas canvas { display: block; width: 100%; height: 100%; }
+.event-card {
+  align-items: flex-start;
+  min-height: 72px;
+  padding: 14px 17px;
+  border: 1px solid #28374a;
+  border-top: 0;
+  border-radius: 0 0 11px 11px;
+  background: #192332;
+}
+.event-kind { flex: 0 0 118px; color: #8ed9c6; font-size: 11px; font-weight: 800; letter-spacing: .12em; }
+#event-caption { margin: -2px 0 0; color: #c4cedb; line-height: 1.45; }
+footer { padding-top: 13px; color: #758399; font-size: 12px; }
+
+@media (max-width: 720px) {
+  main { width: calc(100% - 20px); padding-top: 18px; }
+  .topbar { align-items: flex-start; flex-direction: column; }
+  .player { flex-wrap: wrap; gap: 9px; }
+  #timeline { order: 5; flex: 1 0 100%; }
+  .event-count { margin-left: auto; }
+  #office-canvas { min-height: 290px; aspect-ratio: 1.25 / 1; }
+  .event-kind { flex-basis: 84px; }
+}

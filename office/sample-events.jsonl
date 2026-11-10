@@ -1,0 +1,21 @@
+{"t":0.0,"ts":1794260400.0,"type":"activate","agent":"tech_lead","objective":"Plan a small URL shortener","reads":["request"]}
+{"t":0.4,"ts":1794260400.4,"type":"handoff","from":"tech_lead","to":"product_manager","objective":"Write a PRD with clear acceptance criteria"}
+{"t":0.7,"ts":1794260400.7,"type":"activate","agent":"product_manager","objective":"Write a PRD with clear acceptance criteria","reads":["request"]}
+{"t":4.1,"ts":1794260404.1,"type":"artifact_written","agent":"product_manager","name":"prd"}
+{"t":4.3,"ts":1794260404.3,"type":"result","agent":"product_manager","status":"done","summary":"Created a concise PRD with four acceptance criteria","steps":2,"tokens":820}
+{"t":4.6,"ts":1794260404.6,"type":"activate","agent":"tech_lead","objective":"Choose the next planning role","reads":["artifact_index"]}
+{"t":4.9,"ts":1794260404.9,"type":"handoff","from":"tech_lead","to":"architect","objective":"Design the API and storage model from the PRD"}
+{"t":5.2,"ts":1794260405.2,"type":"activate","agent":"architect","objective":"Design the API and storage model from the PRD","reads":["prd","stack_catalog"]}
+{"t":9.0,"ts":1794260409.0,"type":"tool_call","agent":"architect","tool":"write_artifact","arg":"design"}
+{"t":9.3,"ts":1794260409.3,"type":"artifact_written","agent":"architect","name":"design"}
+{"t":9.5,"ts":1794260409.5,"type":"result","agent":"architect","status":"done","summary":"Selected FastAPI and defined the URL data model","steps":2,"tokens":1030}
+{"t":9.8,"ts":1794260409.8,"type":"activate","agent":"tech_lead","objective":"Choose the next planning role","reads":["artifact_index"]}
+{"t":10.1,"ts":1794260410.1,"type":"handoff","from":"tech_lead","to":"project_manager","objective":"Break the design into independently testable tasks"}
+{"t":10.4,"ts":1794260410.4,"type":"activate","agent":"project_manager","objective":"Break the design into independently testable tasks","reads":["prd","design"]}
+{"t":13.6,"ts":1794260413.6,"type":"artifact_written","agent":"project_manager","name":"tasks"}
+{"t":13.8,"ts":1794260413.8,"type":"result","agent":"project_manager","status":"done","summary":"Created three ordered implementation tasks","steps":2,"tokens":740}
+{"t":14.0,"ts":1794260414.0,"type":"activate","agent":"tech_lead","objective":"Planning complete: 3 tasks planned","reads":["artifact_index"]}
+{"t":14.2,"ts":1794260414.2,"type":"handoff","from":"tech_lead","to":"approval","objective":"Review the task board before implementation"}
+{"t":14.3,"ts":1794260414.3,"type":"approval","status":"requested","task_count":3,"reason":"Planning complete: 3 tasks planned"}
+{"t":18.0,"ts":1794260418.0,"type":"approval","status":"approved","task_count":3,"reason":"Plan approved with 3 tasks"}
+{"t":18.2,"ts":1794260418.2,"type":"finish","status":"done","reason":"3 tasks planned"}
