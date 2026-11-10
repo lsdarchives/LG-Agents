@@ -351,8 +351,8 @@ def resume(run_id: str) -> dict:
     return graph.invoke(None, config)
 
 
-def respond_to_plan(run_id: str, action: str) -> dict:
-    """Resume a paused approval interrupt with the current (possibly edited) task board."""
+def plan_response_command(run_id: str, action: str, task_board: list[dict] | None = None):
+    """Build the checkpoint resume command for an approval decision."""
     graph = build_pipeline(open_checkpointer())
     config = run_config(run_id)
     snapshot = graph.get_state(config)
@@ -363,12 +363,21 @@ def respond_to_plan(run_id: str, action: str) -> dict:
 
     decision = {"action": action}
     if action == "approve":
-        raw = workspace_for(run_id).read_artifact("tasks.json")
-        try:
-            decision["task_board"] = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise SystemExit(f"tasks.json is invalid JSON at line {exc.lineno}, column {exc.colno}") from exc
-    return graph.invoke(Command(resume=decision), config)
+        if task_board is not None:
+            decision["task_board"] = task_board
+        else:
+            raw = workspace_for(run_id).read_artifact("tasks.json")
+            try:
+                decision["task_board"] = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise SystemExit(f"tasks.json is invalid JSON at line {exc.lineno}, column {exc.colno}") from exc
+    return graph, config, Command(resume=decision)
+
+
+def respond_to_plan(run_id: str, action: str) -> dict:
+    """Resume a paused approval interrupt with the current (possibly edited) task board."""
+    graph, config, command = plan_response_command(run_id, action)
+    return graph.invoke(command, config)
 
 
 def main() -> int:

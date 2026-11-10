@@ -59,7 +59,7 @@ See [06-v2-guide.md](06-v2-guide.md) for each step's walkthrough.
 | 13 | Team state, resumable runs, valid event log | `.venv\Scripts\python -m pytest checks -q`, then `.venv\Scripts\python -X utf8 -m checks.phase02` (requires `.env`; kills the run after 2 agents, resumes it; expect `phase 2 check: PASS`; events in `runs/<run_id>/events.jsonl`). Resume any run with `.venv\Scripts\python -m devteam.team_graph --resume <run_id>` |
 | 14 | Tech Lead routes the planning team through validated handoffs and LangGraph `Command` | `.venv\Scripts\python -m pytest checks -q`, then `.venv\Scripts\python -X utf8 -m checks.phase03` (requires `.env`; expect `phase 3 check: PASS`; route and artifacts are saved under `runs/` and `workspace/`) |
 | 14b | Replay a saved run in the Phaser office, offline from the LLM | Open `office/index.html`, click **Load sample**, then load `runs/<run_id>/events.jsonl` with **Open events.jsonl** |
-| 15 | Completed plans pause for approval; approve, reject, or edit `tasks.json` before resuming | Run `.venv\Scripts\python -m devteam.team_graph "Build a tiny URL shortener API"`; inspect or edit `workspace/<run_id>/.devteam/tasks.json`, then use `--approve-plan <run_id>` or `--reject-plan <run_id>` |
+| 15 | Completed plans pause for approval; stream events live and approve, reject, or edit the task board | Run `.venv\Scripts\python -m server`, open `http://127.0.0.1:8000`, then start a request; the meeting room accepts task-board edits. CLI approval remains available with `devteam.team_graph --approve-plan <run_id>` or `--reject-plan <run_id>` |
 
 Lint the project code itself:
 

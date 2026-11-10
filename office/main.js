@@ -103,32 +103,31 @@ class OfficeScene extends Phaser.Scene {
   }
 
   createActors(names) {
-    const teams = new Map(Object.keys(ROOMS).map((key) => [key, []]));
-    for (const name of names) teams.get(roomFor(name)).push(name);
-    for (const [roomKey, members] of teams) {
+    for (const name of names) {
+      if (this.actors.has(name)) continue;
+      const roomKey = roomFor(name);
       const room = ROOMS[roomKey];
+      const memberCount = [...this.actors.values()].filter((actor) => actor.roomKey === roomKey).length;
       const columns = Math.max(1, Math.floor((room.w - 40) / 88));
-      members.forEach((name, index) => {
-        const column = index % columns;
-        const row = Math.floor(index / columns);
-        const x = room.x + 22 + column * 88;
-        const y = room.y + 82 + row * 78;
-        const tint = this.colorFor(name);
-        this.add.rectangle(x + 28, y + 14, 58, 26, 0x111a24, 0.9).setStrokeStyle(1, 0x65758a, 0.7);
-        this.add.rectangle(x + 28, y + 27, 7, 16, 0x5b6878, 0.85);
-        this.blockedCells.add(this.cellKey(x + 28, y + 14));
-        const avatar = this.add.container(x + 28, y + 51, [
-          this.add.ellipse(0, 20, 26, 7, 0x0e151d, 0.55),
-          this.add.rectangle(0, 7, 20, 21, tint).setStrokeStyle(1, 0x17212c, 0.8),
-          this.add.circle(0, -8, 8, 0xf0c7a6).setStrokeStyle(1, 0x543d35, 0.8),
-          this.add.text(0, 27, name.replaceAll("_", " "), {
-            fontFamily: "Segoe UI, sans-serif", fontSize: "10px", color: "#edf3fa", align: "center",
-            backgroundColor: "#17212c", padding: { x: 3, y: 2 },
-          }).setOrigin(0.5, 0),
-        ]);
-        const actor = { name, home: { x: x + 28, y: y + 51 }, avatar, bubble: null };
-        this.actors.set(name, actor);
-      });
+      const column = memberCount % columns;
+      const row = Math.floor(memberCount / columns);
+      const x = room.x + 22 + column * 88;
+      const y = room.y + 82 + row * 78;
+      const tint = this.colorFor(name);
+      this.add.rectangle(x + 28, y + 14, 58, 26, 0x111a24, 0.9).setStrokeStyle(1, 0x65758a, 0.7);
+      this.add.rectangle(x + 28, y + 27, 7, 16, 0x5b6878, 0.85);
+      this.blockedCells.add(this.cellKey(x + 28, y + 14));
+      const avatar = this.add.container(x + 28, y + 51, [
+        this.add.ellipse(0, 20, 26, 7, 0x0e151d, 0.55),
+        this.add.rectangle(0, 7, 20, 21, tint).setStrokeStyle(1, 0x17212c, 0.8),
+        this.add.circle(0, -8, 8, 0xf0c7a6).setStrokeStyle(1, 0x543d35, 0.8),
+        this.add.text(0, 27, name.replaceAll("_", " "), {
+          fontFamily: "Segoe UI, sans-serif", fontSize: "10px", color: "#edf3fa", align: "center",
+          backgroundColor: "#17212c", padding: { x: 3, y: 2 },
+        }).setOrigin(0.5, 0),
+      ]);
+      const actor = { name, roomKey, home: { x: x + 28, y: y + 51 }, avatar, bubble: null };
+      this.actors.set(name, actor);
     }
   }
 
@@ -323,6 +322,15 @@ const timeline = document.querySelector("#timeline");
 const eventCount = document.querySelector("#event-count");
 const eventKind = document.querySelector("#event-kind");
 const eventCaption = document.querySelector("#event-caption");
+const liveForm = document.querySelector("#live-form");
+const liveStatus = document.querySelector("#live-status");
+const liveStartButton = document.querySelector("#start-live-button");
+const meetingRoom = document.querySelector("#meeting-room");
+const taskBoardEditor = document.querySelector("#task-board-editor");
+const approvePlanButton = document.querySelector("#approve-plan-button");
+const rejectPlanButton = document.querySelector("#reject-plan-button");
+let liveSocket = null;
+let liveRenderQueue = Promise.resolve();
 
 function setCaption(event, index) {
   eventKind.textContent = event ? event.type.replaceAll("_", " ").toUpperCase() : "READY";
@@ -355,6 +363,105 @@ function loadEvents(nextEvents, label) {
   updateControls();
   if (scene) scene.loadEvents();
 }
+
+function appendLiveEvent(event) {
+  events.push(event);
+  const index = events.length - 1;
+  if (scene) scene.createActors(agentsIn([event]));
+  updateControls();
+  liveRenderQueue = liveRenderQueue.then(async () => {
+    if (scene) await scene.applyEvent(event, true);
+    cursor = index;
+    timeline.value = String(cursor);
+    setCaption(event, cursor);
+  });
+}
+
+function setPlanDecisionButtons(disabled) {
+  approvePlanButton.disabled = disabled;
+  rejectPlanButton.disabled = disabled;
+}
+
+liveForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const request = document.querySelector("#project-request").value.trim();
+  if (!request) return;
+  liveStartButton.disabled = true;
+  meetingRoom.hidden = true;
+  liveStatus.textContent = "Creating a live run…";
+  events = [];
+  cursor = -1;
+  setCaption(null, cursor);
+  updateControls();
+  if (scene) scene.loadEvents();
+  if (liveSocket) liveSocket.close();
+
+  try {
+    const response = await fetch("/api/runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request }),
+    });
+    if (!response.ok) throw new Error(`Server returned ${response.status}.`);
+    const { run_id: runId } = await response.json();
+    const socketScheme = window.location.protocol === "https:" ? "wss:" : "ws:";
+    liveSocket = new WebSocket(`${socketScheme}//${window.location.host}/ws/runs/${encodeURIComponent(runId)}`);
+    liveSocket.addEventListener("open", () => {
+      liveStatus.textContent = `Connected to run ${runId}; planning is starting.`;
+      liveSocket.send(JSON.stringify({ action: "start", request }));
+    }, { once: true });
+    liveSocket.addEventListener("message", (message) => {
+      const payload = JSON.parse(message.data);
+      if (payload.kind === "event") {
+        appendLiveEvent(payload.event);
+      } else if (payload.kind === "state") {
+        const state = payload.state;
+        liveStatus.textContent = `Run ${state.status}: ${state.reason || "team activity finished"}`;
+        liveStartButton.disabled = ["running", "awaiting_approval"].includes(state.status);
+        if (state.status === "awaiting_approval") {
+          taskBoardEditor.value = JSON.stringify(state.task_board, null, 2);
+          meetingRoom.hidden = false;
+          setPlanDecisionButtons(false);
+        } else {
+          meetingRoom.hidden = true;
+        }
+      } else if (payload.kind === "error") {
+        liveStatus.textContent = `Live run error: ${payload.message}`;
+        if (meetingRoom.hidden) liveStartButton.disabled = false;
+        setPlanDecisionButtons(false);
+      }
+    });
+    liveSocket.addEventListener("error", () => {
+      liveStatus.textContent = "Could not connect to the office server. Check that it is running and reload this page.";
+      liveStartButton.disabled = false;
+    });
+  } catch (error) {
+    liveStatus.textContent = `${error.message} Start the server with .venv\\Scripts\\python -m server, then open http://127.0.0.1:8000/.`;
+    liveStartButton.disabled = false;
+  }
+});
+
+approvePlanButton.addEventListener("click", () => {
+  if (!liveSocket || liveSocket.readyState !== WebSocket.OPEN) return;
+  let taskBoard;
+  try {
+    taskBoard = JSON.parse(taskBoardEditor.value);
+    if (!Array.isArray(taskBoard)) throw new Error("Task board must be a JSON array.");
+  } catch (error) {
+    liveStatus.textContent = `Cannot approve this JSON: ${error.message}`;
+    return;
+  }
+  setPlanDecisionButtons(true);
+  liveStatus.textContent = "Sending the edited plan for approval…";
+  liveSocket.send(JSON.stringify({ action: "approve", task_board: taskBoard }));
+});
+
+rejectPlanButton.addEventListener("click", () => {
+  if (!liveSocket || liveSocket.readyState !== WebSocket.OPEN) return;
+  setPlanDecisionButtons(true);
+  liveStatus.textContent = "Rejecting the plan…";
+  liveSocket.send(JSON.stringify({ action: "reject" }));
+});
 
 async function pause(milliseconds) {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));

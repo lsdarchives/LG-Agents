@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>DevTeam Office Replay</title>
+    <title>DevTeam Office</title>
     <link rel="stylesheet" href="style.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/phaser/3.80.1/phaser.min.js" defer></script>
     <script src="main.js" defer></script>
@@ -12,9 +12,9 @@
     <main>
       <header class="topbar">
         <div>
-          <p class="eyebrow">DEVTEAM / MILESTONE A</p>
-          <h1>Office replay</h1>
-          <p class="intro">Watch a run move between rooms, agents, and artifacts.</p>
+          <p class="eyebrow">DEVTEAM / MILESTONE B</p>
+          <h1>DevTeam office</h1>
+          <p class="intro">Watch a live run or replay its event log.</p>
         </div>
         <div class="load-controls">
           <button id="sample-button" class="secondary">Load sample</button>
@@ -22,6 +22,26 @@
           <input id="event-file" type="file" accept=".jsonl,.json,application/json,text/plain">
         </div>
       </header>
+
+      <section class="live-panel" aria-label="Live team run">
+        <form id="live-form">
+          <label for="project-request">Start a live project</label>
+          <div class="live-start-row">
+            <input id="project-request" type="text" maxlength="10000" placeholder="Describe what you want the team to build" required>
+            <button id="start-live-button" class="primary" type="submit">Start run</button>
+          </div>
+        </form>
+        <p id="live-status" class="live-status" aria-live="polite">Live runs need the local server. Start it with <code>.venv\Scripts\python -m server</code>.</p>
+        <div id="meeting-room" class="meeting-room" hidden>
+          <h2>Meeting room · plan approval</h2>
+          <p>Review or edit the proposed task board before the team proceeds.</p>
+          <textarea id="task-board-editor" spellcheck="false" aria-label="Editable task board JSON"></textarea>
+          <div class="meeting-actions">
+            <button id="approve-plan-button" class="primary" type="button">Approve plan</button>
+            <button id="reject-plan-button" class="secondary" type="button">Reject plan</button>
+          </div>
+        </div>
+      </section>
 
       <section class="player" aria-label="Replay controls">
         <button id="play-button" class="primary" disabled>Play</button>

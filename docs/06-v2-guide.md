@@ -1787,7 +1787,8 @@ team proceeds. Step 16's builders will only run after the plan is approved.
 After `project_manager` writes `tasks.json`, the Tech Lead routes to an `approval` node. The node
 uses LangGraph `interrupt()` to surface the request, task board, and artifact path. The SQLite
 checkpointer saves the run with status `awaiting_approval`; no model call is needed to approve or
-reject it. The event log records the request and the final decision.
+reject it. The event log records the request and the final decision. The office can now stream the
+same graph events over WebSocket and show an editable task board in its meeting room.
 
 Start a plan from PowerShell:
 
@@ -1806,12 +1807,25 @@ unique task IDs, titles, and valid dependency IDs. Then resume with either:
 
 Approval loads the latest file contents, so edits made before resuming become the graph's task
 board. Rejection ends the run as partial. `--resume` remains for killed or crashed runs and does not
-bypass a pending approval. The same `Command(resume=...)` interface can later be called by the
-office server's approval button.
+bypass a pending approval.
 
-**Try it:** approve one generated plan unchanged, then start another run, edit its task JSON and
-approve it; verify the resulting run state and events include the approved board. Reject a third
-plan and confirm it ends with a partial status.
+#### Live office
+
+Install the updated requirements, then run the local server from the repository root:
+
+```powershell
+.venv\Scripts\python -m pip install -r requirements.txt
+.venv\Scripts\python -m server
+```
+
+Open `http://127.0.0.1:8000`, enter a request, and press **Start run**. The browser receives each
+event while the graph is running. At the approval interrupt, the meeting room shows the task board
+as editable JSON; approve or reject it there. The local server also writes the normal
+`runs/<run_id>/events.jsonl` and SQLite checkpoint, so the same run can be inspected or resumed
+from the CLI.
+
+**Try it:** start a live run, edit the task board in the meeting room, and approve it. Start another
+run and reject its plan. Then inspect the saved event log and checkpoint state.
 
 **Check yourself:**
 
@@ -1825,8 +1839,8 @@ plan and confirm it ends with a partial status.
   agents; `--approve-plan` resumes the saved interrupt.
 - **Approval is explicit.** Editing `tasks.json` alone does not start builders or mark the plan
   approved.
-- **The event stream is UI-ready.** The approval event gives a future office view a clear pause and
-  decision to display.
+- **The event stream is shared.** Replay reads the saved JSONL log; live mode receives the same
+  validated events from LangGraph's custom stream.
 
 ### Step 16: One builder and the per-task quality loop
 _Written when the step is built._

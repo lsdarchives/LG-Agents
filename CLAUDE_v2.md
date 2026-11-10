@@ -162,11 +162,12 @@ free, permissively licensed office tileset); not a copy of any existing game.
   a walk to the owner of the answer. tests failed: a bug sprite on the desk, the debugger visits.
   review: reviewers meet in the meeting room and return with ✅/🔴. Idle: coffee machine.
 - **Game layer.** Per-agent stats (tasks done, fix loops, tokens, first-try streak); budget as an
-  energy/clock bar; click a desk to read the agent's artifacts; plan approval is a future meeting-room action.
+  energy/clock bar; click a desk to read the agent's artifacts; plan approval is available in the meeting room.
 - **Files.** `office/index.html`, `office/main.js`, `office/style.css` (Phaser 3, exact version from cdnjs),
   `office/sample-events.jsonl` (for building the UI without LLM calls);
   `devteam/events.py`; `server.py` (live mode only).
-- **Modes.** Replay (open a run's events.jsonl, works offline) first; live (WebSocket) is planned after CLI approval.
+- **Modes.** Replay a saved `events.jsonl` without model calls, or use the local FastAPI server to
+  stream graph events over WebSocket and approve or reject a plan in the meeting room.
 
 ## Build order (commit after each; check before moving on)
 11. **Registry + builder.** Load agents.yaml, validate, build 3 agents without tools.
@@ -181,9 +182,10 @@ free, permissively licensed office tileset); not a copy of any existing game.
 14b. **Office replay viewer** (`office/`, Phaser 3): rooms per team, avatars at desks, grid pathfinding
     between desks, speech/thought bubbles, playback controls (play/pause/speed/scrub), and file picker.
     Check: replaying the sample or a step 14 run's events.jsonl shows every handoff as a walk + bubble.
-15. **Human approval with interrupt()** after the task board (`--approve-plan <run_id>`).
-    Check: run pauses, you approve, reject, or edit the saved JSON task board from the CLI, and the
-    checkpoint resumes with the approved plan. A future office server can call the same resume API.
+15. **Human approval with interrupt() + live office.** The local FastAPI server streams run events
+    over WebSocket; its meeting room can edit, approve, or reject the saved task board. CLI decisions
+    remain available. Check: the run pauses, the office displays the board, and the checkpoint
+    resumes with the approved plan.
 16. **One builder + per-task quality loop** (test_engineer, backend_dev, qa_runner, debugger).
     Check: a 3-task backend app goes green task by task.
 17. **All builders + domain advisors.** Check: Tech Lead picks the right advisor/builder.
