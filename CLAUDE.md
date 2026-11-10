@@ -1,5 +1,9 @@
 # DevTeam — LangGraph multi-agent coding loop
 
+> **v1 (below) is finished.** v2, an autonomous team of agents defined in `agents.yaml`, has its spec,
+> build order (steps 11+) and conventions in [CLAUDE_v2.md](CLAUDE_v2.md); follow it for all new work.
+> The v2 guide is docs/06-v2-guide.md (updated after each v2 step, like LEARNING.md for v1).
+
 ## Goal
 A LangGraph multi-agent "dev team" that takes a small Python task, writes tests,
 writes code, runs the tests for real, and loops on failures until they pass or a cap is hit.
@@ -11,17 +15,19 @@ before implementing it, and stop after each step so I can run and check it.
 - CLI only, no frontend: `python main.py "task description"`
 - One LLM model for all agents
 - Python 3.11+ (use 3.14; 3.15 lacks a zstandard wheel), venv, deps in requirements.txt:
-  langgraph, langchain-google-genai, pytest, ruff, python-dotenv (mlflow optional, step 10)
+  langgraph, langchain-google-genai, langchain-groq, pytest, ruff, python-dotenv (mlflow optional, step 10)
 
-## LLM provider: Google Gemini (free tier)
-- Use `ChatGoogleGenerativeAI` from `langchain-google-genai`; key is `GOOGLE_API_KEY` in `.env`
-- Model: a free-tier Flash model (e.g. `gemini-3.8-flash`); set it ONCE as `MODEL_NAME` in
-  `devteam/agents.py` so it's easy to change. Check exact model IDs in Google AI Studio.
+## LLM provider: Groq (free tier), Gemini as fallback
+- Primary: `ChatGroq` from `langchain-groq`, model `openai/gpt-oss-120b`, `reasoning_effort="low"`;
+  key is `GROQ_API_KEY` in `.env`. Free tier is far larger than Gemini's (reported ~1K req/day)
+- Fallback: `ChatGoogleGenerativeAI` (`gemini-3.5-flash`, `thinking_level="low"`), `GOOGLE_API_KEY`
+- Set `PROVIDER` ONCE in `devteam/agents.py` (`MODEL_NAMES` holds one model per provider); all
+  model creation stays in `get_llm()` so switching is a one-line change
 - Free tier has per-minute and per-day limits: wrap every LLM call with retry + backoff on
-  429 / RESOURCE_EXHAUSTED (e.g. wait 10s, 20s, 40s, then fail clearly)
+  429 / RESOURCE_EXHAUSTED and 503 / UNAVAILABLE (wait 10s, 20s, 40s, then fail clearly);
+  library retries off (`max_retries=0`) so they don't stack. A per-day quota 429 fails at once
+  (Gemini free tier can be 20 requests/model/day; waiting seconds won't help)
 - Keep prompts lean (send only current code, tests and last test output, not full history)
-- Fallback provider if limits hit: Groq via `langchain-groq` (`GROQ_API_KEY`); keep the model
-  creation in one `get_llm()` function so switching is a one-line change
 
 ## Roles
 LLM agents:
@@ -56,10 +62,12 @@ architect -> test_writer -> coder -> run_checks
 main.py            # CLI entry
 runs/              # per-run folder, per-iteration code + diagnosis logs (gitignored)
 docs/
-  README.md        # index of all docs (existing + planned)
-  LEARNING.md      # learning log, one section per build step + glossary
-  setup.md         # environment setup + how to run each step's check
-  tasks.md         # test tasks
+  README.md        # index of all docs, in reading order
+  01-setup.md      # environment setup + how to run each step's check
+  LEARNING.md      # (02) the guide; plain name so it can be shared standalone
+  03-tasks.md      # test tasks
+  04-results.md    # stub until step 9: iterations + pass rate per task
+  05-tracing.md    # stub until step 10 (optional): MLflow tracing
 devteam/
   state.py
   prompts.py
@@ -96,4 +104,6 @@ Gitignore: .env, runs/, mlruns/, .venv/
   with a full walkthrough (Goal, Concepts, Code, Design notes, Check, Try it, Check yourself,
   Gotchas) and add new concepts/glossary/FAQ entries. It's a sellable guide for other developers:
   self-contained (code inline), no personal notes
-- New docs go in docs/ and get a line in docs/README.md
+- After each build step, also add that step's check to docs/01-setup.md and update the Status
+  column in docs/README.md (fill 04-results.md at step 9, 05-tracing.md at step 10)
+- New docs go in docs/ with the next number prefix (NN-name.md) and get a row in docs/README.md

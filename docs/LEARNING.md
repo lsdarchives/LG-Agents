@@ -60,19 +60,24 @@ back the best attempt it produced.
 - Python 3.11–3.14. **Avoid 3.15 for now:** `zstandard`, which langgraph's dependencies pull in,
   has no prebuilt wheel for it yet, so pip tries to compile it and fails (on Windows with
   *"Microsoft Visual C++ 14.0 or greater is required"*).
-- A free Google AI Studio API key (Gemini). Groq is an optional fallback.
+- A free Groq API key (console.groq.com). A Google AI Studio key (Gemini) is an optional
+  fallback.
 
 ```bash
 python -m venv .venv
 # Windows: .venv\Scripts\activate    macOS/Linux: source .venv/bin/activate
-pip install langgraph langchain-google-genai pytest ruff python-dotenv
+pip install langgraph langchain-google-genai langchain-groq pytest ruff python-dotenv
 ```
 
 Create `.env` in the project root and **never commit it**:
 
 ```
-GOOGLE_API_KEY=your-key-here
+GROQ_API_KEY=your-key-here
+GOOGLE_API_KEY=your-key-here   # optional fallback
 ```
+
+The line must be exactly `NAME=value`: no spaces around `=`, no quotes. A key pasted on its own
+line is silently ignored, and you'll get *"No API key was provided"* later.
 
 `.gitignore`:
 
@@ -87,8 +92,9 @@ Project layout you'll end up with:
 
 ```
 main.py            # CLI entry point
-tasks.md           # sample tasks to test the system with
 runs/              # per-run logs (gitignored)
+docs/
+  03-tasks.md      # sample tasks to test the system with
 devteam/
   __init__.py
   state.py         # the shared state definition
@@ -295,24 +301,68 @@ to send.
 ### 1.14 Rate limits and backoff
 
 **Definition:** free-tier APIs limit requests per minute and per day. When you exceed them they
-return HTTP 429 / `RESOURCE_EXHAUSTED`. **Exponential backoff** means waiting progressively longer
-between retries (10s, 20s, 40s) before giving up with a clear error.
+return HTTP 429 / `RESOURCE_EXHAUSTED`. A busy model can also return 503 `UNAVAILABLE`.
+**Exponential backoff** means waiting progressively longer between retries (10s, 20s, 40s) before
+giving up with a clear error.
 
 **Why it matters:** a multi-agent loop makes many calls quickly. Without backoff, one rate-limit
 error crashes the whole run.
 
-**In the project:** a retry wrapper around every LLM call (step 3).
+Retry only **transient** errors (429, 503). A wrong key (401) or an unknown model (404) will fail
+every time, so retrying them just wastes a minute. And keep **one** retry layer: LangChain's
+model classes retry on their own by default, so turn that off (`max_retries=0`) when you write
+your own, or the waits multiply.
+
+Not every 429 is the same, either. A **per-minute** limit clears in seconds, so backoff works. A
+**per-day** limit (on Gemini's free tier this can be as low as 20 requests per model per day)
+won't clear for hours, so fail at once and say so. The error text names the quota
+(`...PerDay...`), which tells you which one you hit.
+
+**In the project:** `call_llm()` in `devteam/agents.py` wraps every LLM call (step 3).
 
 ### 1.15 Provider abstraction
 
 **Definition:** creating the model in one place (`get_llm()`) so every agent uses it and switching
 provider or model is a one-line change.
 
-**Why it matters:** models get renamed and deprecated, and free tiers change. You'll switch more
-often than you expect.
+**Why it matters:** models get renamed and deprecated, and free tiers change. On a given day the
+newest model can also be so overloaded that a one-word reply takes 90 seconds, while an older one
+answers in 3. You'll switch more often than you expect.
 
-**In the project:** `MODEL_NAME` and `get_llm()` in `devteam/agents.py`. Gemini is the default,
-and Groq (`langchain-groq`) is the fallback.
+**In the project:** `PROVIDER`, `MODEL_NAMES` and `get_llm()` in `devteam/agents.py`. Steps 1–4
+were built on Gemini (`gemini-3.5-flash`). From step 5 the primary provider is Groq
+(`openai/gpt-oss-120b`), whose free tier allows far more requests per day, and Gemini is the
+fallback. Only `get_llm()` knows which class it builds; every agent just calls `call_llm()`:
+
+```python
+PROVIDER = "groq"
+MODEL_NAMES = {
+    "groq": "openai/gpt-oss-120b",  # GROQ_API_KEY; large free daily quota
+    "gemini": "gemini-3.5-flash",  # GOOGLE_API_KEY; free tier ~20 requests/model/day
+}
+MODEL_NAME = MODEL_NAMES[PROVIDER]
+
+
+@lru_cache(maxsize=1)
+def get_llm():
+    """Create the chat model once. Switching provider is a change to PROVIDER only."""
+    load_dotenv()  # reads GROQ_API_KEY / GOOGLE_API_KEY from .env
+    if PROVIDER == "groq":
+        return ChatGroq(
+            model=MODEL_NAME,
+            temperature=0.2,
+            reasoning_effort="low",  # gpt-oss reasons before answering; low keeps it fast
+            timeout=120,
+            max_retries=0,
+        )
+    return ChatGoogleGenerativeAI(
+        model=MODEL_NAME, temperature=0.2, thinking_level="low", timeout=120, max_retries=0
+    )
+```
+
+The retry helpers didn't need to change: Groq's rate-limit errors also contain `429`, and its
+daily-limit message says "per day", so `_should_retry` and `_is_daily_quota` classify them the
+same way.
 
 ### 1.16 Role boundaries
 
@@ -451,6 +501,7 @@ class DevState(TypedDict):
     # Best attempt tracking
     best_code: str  # code with the highest score so far
     best_score: int  # number of passed tests for best_code
+    run_id: str  # local runs/ directory for this invocation
 
     # Outcome
     status: Literal["running", "success", "max_iterations"]
@@ -472,6 +523,7 @@ Also create an empty `devteam/__init__.py`.
   | Debugger verdict | `diagnosis`, `blame` | debugger |
   | Loop control | `iteration`, `test_fix_used` | coder, debugger route |
   | Best attempt | `best_code`, `best_score` | run_checks |
+  | Run logs | `run_id` | run_checks |
   | Outcome | `status` | the end of the graph |
 
 - **Loop-control fields exist *because* graphs can loop.** Plan for termination from the
@@ -713,6 +765,8 @@ Rules:
 - Each expected value must follow directly from the spec. If the spec is unclear on a
   case, leave that case out rather than guess.
 - Standard library + pytest only; no files, network, randomness or time-dependence.
+- Call the functions with real inputs only: no mocks, no monkeypatching of builtins or
+  other modules.
 - Aim for 8-20 focused tests.
 """
 
@@ -762,6 +816,11 @@ def _should_retry(exc: Exception) -> bool:
     )
 
 
+def _is_daily_quota(exc: Exception) -> bool:
+    """True if the 429 is the per-day free-tier cap: waiting seconds won't help."""
+    return "PerDay" in str(exc) or "per day" in str(exc).lower()
+
+
 def call_llm(system: str, user: str) -> str:
     """Send one system + user message, retrying on 429/503. Returns the reply text."""
     messages = [SystemMessage(system), HumanMessage(user)]
@@ -771,6 +830,12 @@ def call_llm(system: str, user: str) -> str:
         except Exception as exc:
             if not _should_retry(exc):
                 raise
+            if _is_daily_quota(exc):
+                raise RuntimeError(
+                    f"Daily free-tier quota for {MODEL_NAME} is used up; retrying today won't "
+                    "help. Switch MODEL_NAME to another model, use the fallback provider, "
+                    "or wait for the reset."
+                ) from exc
             if attempt == len(RETRY_WAITS):
                 raise RuntimeError(
                     f"Still rate-limited/overloaded after {len(RETRY_WAITS)} retries "
@@ -830,7 +895,8 @@ def test_writer(state: DevState) -> dict:
 - **Backoff you can see.** `call_llm` retries only *temporary* errors (429 quota, 503 overloaded)
   and waits 10s, 20s, then 40s before giving up with a clear message. The library's own retries
   are switched off (`max_retries=0`); otherwise both layers retry and the waits multiply. Anything
-  else (a bad key, a 404 model) fails immediately, because retrying can't fix it.
+  else (a bad key, a 404 model) fails immediately, because retrying can't fix it. So does a
+  *daily* quota 429 (`_is_daily_quota`): it resets in hours, not seconds.
 - **`thinking_level="low"`.** Gemini 3 models "think" before answering, and the default level
   is high. For writing a spec or a test file, low is plenty and is many times faster.
 - **`timeout=120`.** Without a request timeout, a stuck call waits forever. With one, it fails and
@@ -933,11 +999,178 @@ Both outcomes are useful: see Gotchas.
 
 **Goal:** an LLM function that turns a spec into `solution.py`, checked with the step 2 tools.
 
-**Concepts:** [Role boundaries](#116-role-boundaries), [Ground truth](#14-ground-truth).
+**Concepts:** [Role boundaries](#116-role-boundaries), [Ground truth](#14-ground-truth),
+[Context engineering](#113-context-engineering-lean-prompts).
 
-**Check:** the coder's output passes the test writer's tests when run through `run_tests`.
+**Code:** append the coder prompts to `devteam/prompts.py`:
 
-_(Full walkthrough with code coming in the next revision.)_
+````python
+CODER_SYSTEM = """\
+You are a Python developer. Implement the spec you are given as a single module, `solution.py`.
+
+Rules:
+- Output ONLY the Python code of `solution.py`, no explanations.
+- Implement exactly the spec: same function names, signatures and exception types.
+- Standard library only. No `print`, no `input()`, no code at module level besides imports,
+  constants and definitions.
+- You never see or change the tests; the spec is your only contract.
+
+The code must also pass a strict linter (ruff). In particular:
+- Imports sorted (stdlib `import x` lines, then `from x import y`), none unused.
+  No `from __future__ import annotations` (not needed on Python 3.11+).
+- Modern type hints: `list[int]`, `dict[str, int]`, `X | None` (not `List`, `Optional`).
+- No unused variables, no bare `except:`, no `except Exception:`.
+- When rejecting a value because of its type (after `isinstance`), raise `TypeError`.
+- No `try`/`except` that only re-raises; use `max()`/`min()` instead of an `if` that
+  just updates a running maximum/minimum.
+- Don't end a function with a bare `return None`; prefer simple, direct code.
+"""
+
+CODER_USER = "Spec:\n\n{spec}"
+
+CODER_RETRY = """
+
+Your previous `solution.py` failed the checks:
+
+```python
+{code}
+```
+
+Diagnosis:
+{diagnosis}
+
+Last test output (may be truncated):
+{test_output}
+
+Lint output:
+{lint_output}
+
+Write a corrected `solution.py` that fixes these problems and still follows the spec.
+"""
+````
+
+In `devteam/agents.py`, add one constant under `RETRY_WAITS`:
+
+```python
+MAX_OUTPUT_CHARS = 3000  # keep only the tail of test output in prompts (lean context)
+```
+
+and append the coder node at the end of the file:
+
+```python
+def _tail(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
+    """Last `limit` characters of text; pytest's summary is at the end."""
+    return text if len(text) <= limit else "...(truncated)...\n" + text[-limit:]
+
+
+def coder(state: DevState) -> dict:
+    """spec (+ previous code, diagnosis, check output on retries) -> solution.py source."""
+    iteration = state.get("iteration", 0) + 1
+    is_retry = bool(state.get("code"))
+    print(f"[coder] iteration={iteration} retry={is_retry}")
+
+    user = prompts.CODER_USER.format(spec=state["spec"])
+    if is_retry:
+        user += prompts.CODER_RETRY.format(
+            code=state["code"],
+            diagnosis=state.get("diagnosis") or "(none)",
+            test_output=_tail(state.get("test_output") or "(none)"),
+            lint_output=state.get("lint_output") or "(none)",
+        )
+
+    code = strip_code_fences(call_llm(prompts.CODER_SYSTEM, user))
+    print(f"[coder] solution.py: {len(code.splitlines())} lines\n{_preview(code)}")
+    return {"code": code, "iteration": iteration}
+```
+
+**Design notes**
+- **The coder never sees the tests.** Its only contract is the spec. If it could read the tests,
+  it would be tempted to code *to the tests* (special-casing an expected value) instead of to the
+  behaviour. On a retry it sees the test *output*, which shows what failed but not the whole test file.
+- **Same node, two modes.** If the state has no `code` yet, this is a first attempt: spec only.
+  Otherwise it's a retry: the spec, plus the previous code, the diagnosis, and the test and lint
+  output. That retry input is exactly what step 6's loop will feed back.
+- **Lean retries.** `_tail` keeps only the last 3,000 characters of the test output. That's
+  where pytest puts the failures and the summary line. The full history of earlier attempts is
+  never sent.
+- **The coder owns `iteration`.** Each call is one attempt, so the coder increments the counter.
+  The cap in step 7 reads it.
+- **Lint rules belong in the prompt.** Recent ruff versions enable a large default rule set:
+  sorted imports, modern type hints, simplifications, and even "raise `TypeError` for a failed
+  `isinstance` check". Code that passes every test can still fail on lint. Naming the rules most
+  likely to trip in the prompt lets the coder pass both checks on the first attempt.
+
+**Check:** run the three agents on a task, then check the coder's code with the step 2 tools.
+
+```python
+from devteam.agents import architect, coder, test_writer
+from devteam.tools import run_lint, run_tests
+
+state = {"task": "Merge overlapping intervals"}
+state |= architect(state)
+state |= test_writer(state)
+state |= coder(state)
+
+tests = run_tests(state["code"], state["tests"])
+lint = run_lint(state["code"])
+print("tests:", tests.passed, tests.score, "| lint clean:", lint.clean)
+print(tests.output[-1500:])
+```
+
+Expected: `iteration == 1`, lint clean, and usually every test passing. If a test fails, read the
+failure before you blame the coder (see Gotchas). Try tasks 1–4 from
+[Sample tasks](#sample-tasks). Task 5 is meant to need fix rounds, so leave it for step 6.
+
+**Try it**
+1. **Exercise the retry path by hand.** Plant a bug in a passing solution and give the coder the
+   failure:
+   ```python
+   bad = state["code"].replace("<=", "<", 1)       # e.g. touching intervals no longer merge
+   r, l = run_tests(bad, state["tests"]), run_lint(bad)
+   print(r.score, r.output.splitlines()[-1])
+   retry = {**state, "code": bad, "test_output": r.output, "lint_output": l.output,
+            "diagnosis": "(no debugger yet - read the test output)"}
+   retry |= coder(retry)                            # prints retry=True, iteration=2
+   print(run_tests(retry["code"], state["tests"]).score)
+   ```
+2. Delete the lint rules from `CODER_SYSTEM` and run tasks 1–4 again. How many lint failures?
+3. Let the coder see the tests: add `state["tests"]` to the user message. Does it start
+   special-casing values from the tests?
+
+**Check yourself**
+1. Why doesn't the coder get the test file?
+2. How does `coder` know whether it's a first attempt or a retry?
+3. Why send only the tail of the test output?
+4. All tests pass but `run_lint` says not clean. Is the attempt a success?
+
+<details><summary>Answers</summary>
+
+1. So it implements the spec, not the particular asserts. Tests are a check, not a target.
+2. `state.get("code")` is empty on the first attempt and filled on every later one.
+3. pytest prints failures and the summary at the end. The rest costs tokens and buries the
+   signal.
+4. No. `passed` (step 5) requires tests *and* lint to be clean, so the loop will send it back.
+</details>
+
+**Gotchas**
+- **Failing tests aren't always the coder's fault.** In practice the test writer sometimes invents
+  non-ASCII examples and gets them wrong. For example it asserted `"Ésépé"` is a palindrome, but
+  lowercased it's `ésépé`, which reads `épésé` backwards. The coder's code was correct. When a single test fails, check its
+  expected value by hand first. This is the case the `blame="test"` route (step 8) exists for.
+- **The coder may still add a `print` or an `if __name__ == "__main__":` demo.** It's harmless
+  for the tests, but the prompt asks for no module-level code, to keep the output predictable.
+- **The test writer can break pytest itself.** One generated test did
+  `monkeypatch.setattr("builtins.int", ...)` to "simulate" an overflow. That replaced `int`
+  for the whole process, pytest crashed with `ValueError: was already stopped`, no summary line
+  was printed, and the score parsed as 0. A score of 0 with a traceback from `_pytest` means
+  "look at the tests", not "the code is broken". The test writer prompt now forbids mocks and
+  monkeypatching.
+- **Models differ in lint discipline.** On Groq's `gpt-oss-120b`, tests passed on 3 of 4 tasks
+  but lint was clean on only about half: unused `typing` imports, `Tuple` instead of `tuple`, a
+  `try`/`except` that only re-raises. Each rule you add to the prompt helps a little; the real
+  fix is the loop in step 6, which feeds `lint_output` back to the coder.
+- **An empty or truncated reply.** If `solution.py` comes back with only a few lines, the request
+  may have hit the free-tier output limit or the timeout. Rerun, or look at the raw reply.
 
 ---
 
@@ -950,7 +1183,75 @@ _(Full walkthrough with code coming in the next revision.)_
 
 **Check:** one full pass from task to test results, with each node printing its name and key fields.
 
-_(Full walkthrough with code coming in the next revision.)_
+#### Build the graph
+
+Create `devteam/graph.py`. It adapts the existing standalone functions to LangGraph without
+changing their role: each node receives the shared state and returns only its updates.
+
+```python
+from langgraph.graph import END, START, StateGraph
+
+from devteam.agents import architect, coder, test_writer
+from devteam.state import DevState
+from devteam.tools import run_lint, run_tests
+
+def run_checks(state: DevState) -> dict:
+    tests = run_tests(state["code"], state["tests"])
+    lint = run_lint(state["code"])
+    return {
+        "test_output": tests.output,
+        "lint_output": lint.output,
+        "passed": tests.passed and lint.clean,
+    }
+
+builder = StateGraph(DevState)
+builder.add_node("architect", architect)
+builder.add_node("test_writer", test_writer)
+builder.add_node("coder", coder)
+builder.add_node("run_checks", run_checks)
+builder.add_edge(START, "architect")
+builder.add_edge("architect", "test_writer")
+builder.add_edge("test_writer", "coder")
+builder.add_edge("coder", "run_checks")
+builder.add_edge("run_checks", END)
+graph = builder.compile()
+```
+
+In this repo, `build_graph()` contains the builder code and compiles it; the module-level `graph`
+is the ready-to-use compiled graph. `run_checks` combines the test and lint results: both must be
+clean for `passed` to be true. It also prints a compact summary, while retaining the full tool
+outputs in state for the next step's debugger.
+
+**Design notes**
+- Each node name in the graph is also the label shown in LangGraph traces.
+- `run_checks` is ordinary Python. It does not ask the model whether generated code works.
+- This section shows the initial linear graph from step 5; step 6 below adds its retry route.
+- An invocation must provide every `DevState` field because the current `TypedDict` fields are
+  all required. The CLI and state initializer arrive in step 9.
+
+**Check**
+
+Compile and inspect the graph without making API calls:
+
+```powershell
+.venv\Scripts\python -c "from devteam.graph import graph; print(sorted(graph.get_graph().nodes))"
+```
+
+For the full pass, provide a complete initial `DevState` and a valid provider key in `.env`, then
+call `graph.invoke(initial_state)`. Confirm the printed node sequence is architect, test_writer,
+coder, run_checks, and inspect `test_output`, `lint_output`, and `passed` in the returned state.
+
+**Try it:** compile the graph, then run it on one short function task. In the step 5 version,
+a failing check still ends the graph; step 6 adds retries.
+
+**Check yourself:** why does `run_checks` return `passed` only when both the test and lint tools
+report success?
+
+**Gotchas**
+- A graph can compile without contacting the model. `invoke` starts the actual API calls.
+- In the step 5 version, `passed=False` does not route anywhere; the step 6 version adds routing.
+- The graph state must include initial values for artifacts such as `spec`, `tests`, and `code`;
+  a small initializer will make that convenient when the CLI is added.
 
 ---
 
@@ -963,7 +1264,60 @@ _(Full walkthrough with code coming in the next revision.)_
 
 **Check:** a hard task (the CSV parser) goes round the loop at least once.
 
-_(Full walkthrough with code coming in the next revision.)_
+#### Get a structured diagnosis
+
+Add a Pydantic model and a debugger prompt. Structured output makes `blame` a validated choice,
+so the graph doesn't have to interpret free-form prose to pick a route:
+
+```python
+class Diagnosis(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    diagnosis: str
+    blame: Literal["code", "test"]
+```
+
+The debugger receives the task, spec, tests, solution, and the latest pytest and ruff output.
+`call_llm_structured` uses the same retry policy as ordinary model calls. Groq uses
+`get_llm().with_structured_output(Diagnosis, method="json_schema", strict=True)`; Gemini uses
+its JSON Schema output mode. The node returns only `diagnosis` and `blame`.
+
+#### Add the cycle
+
+The checks node now routes success to `END` and failure to the debugger. The debugger routes to
+the coder, which produces a new solution and increments `iteration`; checks then run again.
+
+```python
+builder.add_conditional_edges(
+    "run_checks",
+    lambda state: "done" if state["passed"] else "debugger",
+    {"done": END, "debugger": "debugger"},
+)
+builder.add_edge("debugger", "coder")
+```
+
+At this step, the blame field is recorded for analysis, but both blame values go back to the
+coder. Step 8 will add the one-time test rewrite route.
+
+**Check**
+
+Run the CSV parser task from [03-tasks.md](03-tasks.md) with a valid provider key. A run that
+fails its first checks should print `debugger`, then another `coder` and `run_checks` pass. A task
+that passes immediately ends after the first checks.
+
+**Try it:** inspect `diagnosis` and `blame` in the final state after a retry. Compare the diagnosis
+with pytest and ruff output to see whether the model used concrete evidence.
+
+**Check yourself:** which state field determines whether `run_checks` ends or enters the loop?
+
+**Gotchas**
+- This step has no project-level attempt cap yet. LangGraph's recursion limit can stop a stubborn
+  loop with `GraphRecursionError`; step 7 adds a deliberate cap and a useful final result.
+- A structured schema validates the shape and allowed blame value, not whether the diagnosis is
+  correct. Always compare it with the actual check output.
+- The spec is the contract. When a test expectation conflicts with the spec, the debugger should
+  blame the test so the one-time rewrite route can repair it.
+- Repeated calls consume model quota: every failed round adds a debugger call and a coder call.
 
 ---
 
@@ -976,7 +1330,62 @@ _(Full walkthrough with code coming in the next revision.)_
 
 **Check:** with the cap set to 1, the run stops with `status="max_iterations"` and returns `best_code`.
 
-_(Full walkthrough with code coming in the next revision.)_
+#### Keep the strongest result and stop at a cap
+
+Set the maximum coder attempts near the top of `devteam/graph.py`:
+
+```python
+MAX_ITERATIONS = 5
+```
+
+After each test run, `run_checks` parses the passed-test count already returned by `run_tests`.
+It updates `best_code` only when the candidate has a higher score (or when no candidate has been
+saved yet). A passing candidate ends with `status="success"`; a failing candidate at the cap ends
+with `status="max_iterations"` and puts `best_code` in the final `code` field. A failing
+candidate below the cap stays `running` and routes to the debugger.
+
+The score counts passed tests, even if lint fails. Passing the workflow still requires both the
+tests and lint to be clean. This lets the system retain a promising candidate without treating it
+as a successful result.
+
+#### Save per-iteration logs
+
+Each run gets a short unique `run_id`. The checker creates one directory per iteration under the
+gitignored `runs/` directory:
+
+```text
+runs/<run_id>/iteration-01/solution.py
+runs/<run_id>/iteration-01/test_solution.py
+runs/<run_id>/iteration-01/diagnosis.txt
+runs/<run_id>/iteration-01/pytest.txt
+runs/<run_id>/iteration-01/ruff.txt
+```
+
+The first diagnosis file says no diagnosis is available yet. Later iterations capture the
+previous debugger's diagnosis alongside the exact test file, new code, and current check output.
+This makes it possible to review what the checker actually ran and how the coder responded
+without putting generated artifacts in the source tree.
+
+**Check**
+
+Run a task that needs fixes and confirm it stops with either `success` or `max_iterations` after
+no more than five coder attempts. Inspect `best_code`, `best_score`, and the matching folders under
+`runs/<run_id>/`. To exercise the cap quickly, temporarily set `MAX_ITERATIONS = 1`; restore it to
+5 afterward. A first attempt that passes will correctly stop as `success` instead.
+
+**Try it:** compare the final `code` with the last `solution.py` log. At the cap, the final code
+should be the highest-scoring candidate; each iteration directory preserves what was actually
+checked at that point.
+
+**Check yourself:** why can `best_score` reach the full test count while the run still ends with
+`status="max_iterations"`?
+
+**Gotchas**
+- The score measures passing tests only; ruff cleanliness is still required for success.
+- Ties preserve the earlier candidate. This avoids replacing an equally scoring solution without
+  evidence it is better.
+- `runs/` is local and gitignored. Keep it if you want to inspect a run; it is not a durable
+  database and can be deleted when no longer useful.
 
 ---
 
@@ -989,7 +1398,52 @@ _(Full walkthrough with code coming in the next revision.)_
 
 **Check:** a deliberately wrong test is rerouted to the test writer exactly once.
 
-_(Full walkthrough with code coming in the next revision.)_
+#### Route test failures once
+
+The debugger already writes `blame` to state. Add a conditional edge after it: when the verdict is
+`test` and `test_fix_used` is false, run a wrapper around the test writer; otherwise go to the
+coder.
+
+```python
+def route_after_debugger(state: DevState) -> str:
+    if state.get("blame") == "test" and not state.get("test_fix_used", False):
+        return "rewrite_tests"
+    return "coder"
+
+def rewrite_tests(state: DevState) -> dict:
+    return {**test_writer(state), "test_fix_used": True}
+```
+
+The wrapper marks the rewrite as used in the same state update that replaces the tests. The
+test-writer node gets the debugger diagnosis and previous pytest output as extra context on this
+route, so it can correct the mistaken expectation against the spec. On later rounds, even if the
+debugger blames the tests again, `test_fix_used=True` sends the graph to the coder.
+
+**Check**
+
+Check the route guard without making model calls:
+
+```powershell
+.venv\Scripts\python -c "from devteam.graph import route_after_debugger; assert route_after_debugger({'blame': 'test', 'test_fix_used': False}) == 'rewrite_tests'; assert route_after_debugger({'blame': 'test', 'test_fix_used': True}) == 'coder'; assert route_after_debugger({'blame': 'code', 'test_fix_used': False}) == 'coder'; print('test-blame routing OK')"
+```
+
+For an end-to-end run, exercise a task with a known-wrong test expectation and inspect the node
+prints: `rewrite_tests` should appear once at most, and the returned `test_fix_used` should be true
+after that route.
+
+**Try it:** inspect the saved pytest output and debugger diagnosis that led to a rewrite. Confirm
+the revised tests still follow the architect's spec.
+
+**Check yourself:** what prevents a sequence of test-blame verdicts from sending the graph back to
+the test writer indefinitely?
+
+**Gotchas**
+- The test writer can only repair a test by following the spec. If the spec is ambiguous, a test
+  rewrite may not resolve the disagreement.
+- `test_fix_used` is set after the test writer returns. If the model call fails, the graph stops
+  with an error rather than silently marking a rewrite that did not happen.
+- A debugger can misclassify a code bug as a test bug. The one-time limit bounds the damage; check
+  the diagnosis against the actual failure output.
 
 ---
 
@@ -999,7 +1453,72 @@ _(Full walkthrough with code coming in the next revision.)_
 
 **Check:** run all 5 sample tasks and record iterations and pass rate for each.
 
-_(Full walkthrough with code coming in the next revision.)_
+#### Build the initial state
+
+The graph expects state fields for artifacts that do not exist yet, so add `initial_state(task)`
+to `devteam/state.py`. It sets empty strings for generated text, false for result flags, zero for
+the iteration and score, and `status="running"`. `run_id` starts empty; the first check creates
+it and stores it in state.
+
+```python
+def initial_state(task: str) -> DevState:
+    return {
+        "task": task,
+        "spec": "", "tests": "", "code": "",
+        "test_output": "", "lint_output": "", "passed": False,
+        "diagnosis": "", "blame": None,
+        "iteration": 0, "test_fix_used": False,
+        "best_code": "", "best_score": 0,
+        "best_test_output": "", "best_lint_output": "",
+        "run_id": "", "status": "running",
+    }
+```
+
+#### Run and report a task
+
+`main.py` accepts one quoted task description, invokes the compiled graph, saves the selected
+solution at the root of its run folder, and prints the status, attempt count, score, rewrite flag,
+log folder, and check output.
+
+```powershell
+.venv\Scripts\python main.py "Write a function that merges overlapping intervals"
+```
+
+The core of `main.py` parses one positional task and invokes the graph with that initialized state:
+
+```python
+parser = argparse.ArgumentParser(description="Generate and check a Python solution.")
+parser.add_argument("task", help="Python task description, preferably in quotes")
+args = parser.parse_args()
+result = graph.invoke(initial_state(args.task))
+```
+
+The actual CLI also handles interrupts and provider/runtime errors, writes the final code to
+`runs/<run_id>/solution.py`, and returns a nonzero process code unless the status is success.
+
+The output folder contains both the final `solution.py` and the iteration logs. The process exits
+with code 0 for `success`, code 1 for a failed run or `max_iterations`, and code 130 if interrupted.
+API/model errors are printed to stderr with exit code 1.
+
+**Check**
+
+Run each task in [03-tasks.md](03-tasks.md) from the repo root, with a valid provider key in
+`.env`. For each run, record the status, `iteration`, and `best_score` in [04-results.md](04-results.md).
+Check that `runs/<run_id>/solution.py` exists and that each iteration has its own solution, test,
+diagnosis, pytest, and ruff files.
+
+**Try it:** run a simple task first, then the CSV parser. The simpler task should provide a quick
+end-to-end check; the parser exercises retries and the one-time test rewrite route if needed.
+
+**Check yourself:** where is the final selected solution saved, and what exit code signals a run
+that reached the attempt cap?
+
+**Gotchas**
+- Quote the task so PowerShell passes it as one argument. Without quotes, argparse sees multiple
+  positional arguments and exits with usage text.
+- The CLI does not print the whole generated solution; open the reported `solution.py` path.
+- A task can return `max_iterations` with a useful best candidate. The CLI saves that candidate
+  but exits with code 1 so scripts can tell it did not fully pass.
 
 ---
 
@@ -1007,9 +1526,59 @@ _(Full walkthrough with code coming in the next revision.)_
 
 **Goal:** see every node, prompt and response for every run in a UI, and compare runs.
 
-**Check:** `mlflow ui` shows a trace per run, plus per-task metrics (`status`, `iteration`, `best_score`).
+**Concepts:** [LLM node vs tool node](#13-llm-node-vs-tool-node), [trace vs run](05-tracing.md).
 
-_(Full walkthrough with code coming in the next revision.)_
+#### Enable tracing only when requested
+
+MLflow is optional. The CLI recognizes `--trace`; that path imports MLflow, selects an experiment,
+enables LangChain/LangGraph autotracing, and starts an MLflow run around the graph invocation:
+
+```python
+mlflow.set_experiment("devteam")
+mlflow.langchain.autolog()
+
+with mlflow.start_run(run_name="devteam"):
+    result = graph.invoke(initial_state(task))
+    mlflow.log_param("status", result["status"])
+    mlflow.log_metric("iterations", result["iteration"])
+    mlflow.log_metric("best_score", result["best_score"])
+```
+
+The actual CLI also logs the task, DevTeam run ID, test-rewrite flag, and success metric. With no
+`--trace` flag, MLflow is not imported and the normal CLI has no extra dependency.
+
+Install the optional package and run one traced task:
+
+```powershell
+.venv\Scripts\python -m pip install mlflow
+.venv\Scripts\python main.py --trace "Write a function that merges overlapping intervals"
+```
+
+Start the UI from a second terminal at the repository root:
+
+```powershell
+.venv\Scripts\mlflow ui --backend-store-uri ./mlruns
+```
+
+Open `http://127.0.0.1:5000`, choose the `devteam` experiment, then compare metrics in **Runs**
+and inspect the detailed graph execution in **Traces**. See [05-tracing.md](05-tracing.md) for
+setup and troubleshooting details.
+
+**Check:** the `devteam` experiment contains a trace and a run for the invocation; the run has
+`status`, `iterations`, and `best_score` recorded.
+
+**Try it:** run a task once with tracing and once without it. Confirm the usual CLI output and
+saved solution are still present in both cases.
+
+**Check yourself:** where do `best_score` and the node-by-node execution appear in the MLflow UI?
+
+**Gotchas**
+- MLflow is installed separately; a traced run reports a clear error if you request `--trace`
+  without installing it.
+- A trace is different from an MLflow run. The run holds task parameters and summary metrics; the
+  trace holds the nested execution details.
+- Trace data includes prompts, model replies, state values, and generated code. Local data lives
+  in the gitignored `mlruns/` directory.
 
 ---
 
@@ -1091,9 +1660,22 @@ built for.
 Long, multi-purpose prompts give weaker results and are hard to debug. Separate roles give
 you focused prompts and show you *which* part failed.
 
-### Why Gemini's free tier?
+### Why Groq, and why keep Gemini?
+Both have free tiers, but the daily limits differ a lot. Gemini's free Flash tier can be as low
+as 20 requests per model per day; Groq's free tier for `gpt-oss-120b` is reported at about 1,000
+requests and 200K tokens per day (check console.groq.com for current numbers). A full five-task
+evaluation is roughly 60 calls, so on Gemini's free tier it doesn't fit in one day. "More
+requests" isn't the same as "better code", though: compare pass rates per provider once the CLI
+works (step 9). If you outgrow the free tier, Groq's pay-as-you-go tier for this model costs
+cents for a whole evaluation run.
+
+### Why free tiers at all?
 You can build and experiment for free. The trade-off is rate limits, which is why every call has
-backoff and why prompts stay lean. Because the model is created in one `get_llm()` function,
+backoff and why prompts stay lean. Check the **daily** limit in AI Studio before a long session:
+it can be as low as 20 requests per model per day, and one graph pass is at least 3 calls (plus 2
+per fix round). Each model has its own quota, so switching `MODEL_NAME` gives you a fresh one.
+Note that some model IDs are aliases: the error may name a different model than the one you asked
+for, and those IDs share a quota. Because the model is created in one `get_llm()` function,
 moving to a paid model or another provider is a one-line change.
 
 ### Is the temp-dir sandbox safe?
@@ -1106,17 +1688,19 @@ malicious code. Only run tasks you wrote yourself, or use containers.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `429` / `RESOURCE_EXHAUSTED` | Free-tier rate limit | Backoff will retry. Wait, or switch to the fallback provider |
-| Model not found | Model ID renamed or retired | Check the current IDs in Google AI Studio and update `MODEL_NAME` |
+| `429` / `RESOURCE_EXHAUSTED` / `rate_limit_exceeded` | Free-tier rate limit | Backoff will retry. Wait, or switch `PROVIDER` to the fallback |
+| *"Daily free-tier quota ... is used up"* | Per-day cap hit (Gemini `GenerateRequestsPerDay...`, Groq "tokens per day (TPD)") | Switch the model in `MODEL_NAMES` (separate quota), switch `PROVIDER`, or wait for the reset |
+| Model not found | Model ID renamed or retired | Check the current IDs (Groq console or Google AI Studio) and update `MODEL_NAMES` |
 | Tests "pass" with 0 tests | Should be impossible here: exit code 5 counts as a failure | Check `run_tests` still compares `returncode == 0` |
 | Every run says `TIMEOUT` | Generated code loops, or a test waits for input | Read `test_output`. The debugger should flag it |
 | `GraphRecursionError` | Your cap is missing or above LangGraph's recursion limit | Check the `iteration` routing, or raise `recursion_limit` |
 | `ModuleNotFoundError: solution` | Tests import a different module name | Tighten the test writer prompt: "import from `solution`" |
-| *"No API key was provided"* | `.env` line isn't `GOOGLE_API_KEY=...` (e.g. key pasted alone) | Fix the line format. Don't print the parsed `.env` to debug it |
+| *"No API key was provided"* / `GROQ_API_KEY` missing | `.env` line isn't `NAME=...` for the active provider (e.g. key pasted alone) | Fix the line format. Don't print the parsed `.env` to debug it |
 | A call takes minutes, or `504 DEADLINE_EXCEEDED` | The model is overloaded, or thinking at a high level | Use `thinking_level="low"`; time a one-word prompt on other Flash models and switch `MODEL_NAME` |
 | `503 UNAVAILABLE` ("high demand") | Temporary model overload | Backoff retries it. If it keeps happening, switch model |
 | `UnicodeEncodeError` when printing | Windows console isn't UTF-8 | Run `python -X utf8 ...` or set `PYTHONUTF8=1` |
 | Correct code fails a generated test | The test is wrong (LLMs make mistakes too) | Expected now and then. The debugger's `blame="test"` route handles it from step 8 |
+| All tests pass but lint fails (`I001`, `UP006`, `TRY004`, ...) | Recent ruff enables many rules by default | List the commonly tripped rules in `CODER_SYSTEM`. Retries get `lint_output` to fix the rest |
 
 ---
 
@@ -1132,6 +1716,11 @@ Quick definitions. See [Part 1](#part-1-core-concepts) for the full explanations
 | **Tool node** | A graph node that runs ordinary code (no LLM), like `run_checks`. |
 | **Ground truth** | An objective correctness signal, such as test results. |
 | **State** | The shared dict all nodes read and update. Ours is `DevState`. |
+| **Initial state** | The starting values supplied to the graph; `initial_state(task)` creates them for the CLI. |
+| **CLI** | Command-line interface; here, `main.py` accepts a task description and runs the graph. |
+| **Exit code** | The process result: 0 means success, while nonzero reports failure or interruption. |
+| **MLflow run** | One tracked CLI invocation with task parameters and summary metrics. |
+| **Trace** | The nested record of what the graph, nodes, and model calls did during a task. |
 | **Node** | A function `state -> partial update`. |
 | **Edge** | A fixed "after A, run B" connection. |
 | **Conditional edge** | An edge whose target is chosen at runtime by a routing function. |
@@ -1149,6 +1738,10 @@ Quick definitions. See [Part 1](#part-1-core-concepts) for the full explanations
 | **User message** | The per-run part of a prompt: this task, this spec. |
 | **Spec** | The architect's written contract that both the tests and the code are built from. |
 | **Thinking level** | How much hidden reasoning a Gemini 3 model does before answering. Lower is faster. |
+| **Reasoning effort** | The same idea for reasoning models such as gpt-oss on Groq (`reasoning_effort="low"`). |
+| **Provider** | The company/API serving the model (Groq, Gemini). Chosen in one place, `PROVIDER`. |
+| **Retry input** | What the coder gets on a later attempt: spec + previous code + diagnosis + the tail of the check output. |
+| **Coding to the tests** | Special-casing expected values instead of implementing the behaviour. This is why the coder never sees the test file. |
 | **Code fence** | The ```` ``` ```` markers models wrap code in. They must be stripped before writing a `.py` file. |
 | **Best-attempt tracking** | Keeping the highest-scoring result in case the run never fully succeeds. |
 | **Checkpointer** | A LangGraph component that saves state between steps (resume, human-in-the-loop). |
