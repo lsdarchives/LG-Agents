@@ -16,7 +16,7 @@ MAX_OUTPUT_CHARS = 6000  # cap on any single tool reply
 ARTIFACT_DIR = ".devteam"  # team documents (prd, design, ...) live here, not in the project tree
 SKIP_DIRS = {ARTIFACT_DIR, ".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache", ".ruff_cache"}
 ARTIFACT_NAME = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
-ARTIFACT_ALIASES = {"task_board": "tasks.json"}
+ARTIFACT_ALIASES = {"task_board": "tasks.json", "test_report": "test_report.json"}
 NO_OUTPUT = "Command ran successfully with no output."
 
 

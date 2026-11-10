@@ -43,6 +43,14 @@ def stack_catalog() -> str:
     return f"default: {data.get('default_stack')}\n" + "\n".join(lines) + note
 
 
+@cache
+def stack_profile(name: str | None = None) -> dict | None:
+    """Return a configured stack profile, using the catalog default when no name is supplied."""
+    data = yaml.safe_load(STACKS_FILE.read_text(encoding="utf-8"))
+    selected = name or data.get("default_stack")
+    return next((profile for profile in data["stacks"] if profile["name"] == selected), None)
+
+
 def _read(ws: Workspace, name: str) -> str | None:
     try:
         return ws.read_artifact(ALIASES.get(name, name))
@@ -53,9 +61,33 @@ def _read(ws: Workspace, name: str) -> str | None:
 def load_inputs(reads: list[str], state: TeamState, ws: Workspace, extra: dict[str, str] | None = None) -> dict[str, str]:
     """Return {read_name: text} for an agent's `reads`. Unknown/missing reads are left out, and the
     builder shows them as "(not provided)". `extra` (e.g. the Tech Lead's handoff) wins over files."""
+    current_task = next(
+        (task for task in state.get("task_board", []) if task.get("id") == state.get("current_task")),
+        None,
+    )
+    related_files = []
+    test_files = []
+    if current_task:
+        for path in current_task.get("files", []):
+            try:
+                related_files.append(ws.view_file(path))
+            except ToolError:
+                continue
+        test_path = current_task.get("test_file")
+        if test_path:
+            try:
+                test_files.append(ws.view_file(test_path))
+            except ToolError:
+                pass
+    profile = stack_profile(current_task.get("stack")) if current_task else None
     computed = {
         "request": state["request"],
         "task_board": json.dumps(state["task_board"], indent=1) if state["task_board"] else None,
+        "task": json.dumps({**current_task, "id": current_task["id"]}, indent=2) if current_task else None,
+        "stack_profile": json.dumps(profile, indent=2) if profile else None,
+        "related_files": "\n\n".join(related_files) if related_files else None,
+        "test_files": "\n\n".join(test_files) if test_files else None,
+        "diagnosis": state.get("diagnosis") or None,
         "artifact_index": artifact_index(ws),
         "last_agent_result": json.dumps(state["last_result"]) if state["last_result"] else None,
         "budget": f"activations used: {state['activations']} of {MAX_ACTIVATIONS}",

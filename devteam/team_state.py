@@ -18,7 +18,9 @@ class Task(TypedDict, total=False):
     files: list[str]
     depends_on: list[str]
     acceptance: list[str]
+    test_file: str
     status: Literal["todo", "in_progress", "done", "failed"]
+    fix_loops: int
     _delete: bool  # internal reducer marker used when a human removes a task from the plan
 
 
@@ -46,6 +48,7 @@ class TeamState(TypedDict):
     artifacts: Annotated[dict[str, str], merge_dicts]  # artifact name -> path in the workspace
     task_board: Annotated[list[Task], merge_tasks]
     current_task: str | None
+    diagnosis: str
     handoff: dict | None  # objective, inputs, output and boundaries for the current assignment
     last_result: dict  # last agent's result block + its name
     activations: Annotated[int, operator.add]  # each node returns 1; the reducer sums
@@ -63,6 +66,7 @@ def initial_team_state(request: str, run_id: str) -> TeamState:
         "artifacts": {},
         "task_board": [],
         "current_task": None,
+        "diagnosis": "",
         "handoff": None,
         "last_result": {},
         "activations": 0,

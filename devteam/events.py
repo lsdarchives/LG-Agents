@@ -52,6 +52,7 @@ class Tests(_Event):
     agent: str
     passed: int
     failed: int
+    lint_issues: int = 0
 
 
 class Blocked(_Event):

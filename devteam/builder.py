@@ -103,6 +103,7 @@ def build_agent(
     spec: AgentSpec,
     shared_rules: str,
     handoff_targets: dict[str, list[str]] | list[str] | None = None,
+    task_id: str | None = None,
 ) -> Callable[..., dict]:
     """Return agent(inputs, workspace, events=None, objective=None)
     -> {"result", "raw", "steps", "tool_calls", "tokens"}."""
@@ -116,7 +117,7 @@ def build_agent(
         events: EventLog | None = None,
         objective: str | None = None,
     ) -> dict:
-        tools, missing = make_tools(workspace, spec.tools, handoff_targets)
+        tools, missing = make_tools(workspace, spec.tools, handoff_targets, task_id=task_id)
         by_name = {t.name: t for t in tools}
         plain = get_llm(spec.model_tier)
         model = plain.bind_tools(tools) if tools else plain

@@ -59,7 +59,7 @@ function describe(event) {
     case "handoff": return `${event.from} → ${event.to}: ${event.objective || "assignment"}`;
     case "tool_call": return `${event.agent} used ${event.tool}${event.arg ? ` — ${event.arg}` : ""}`;
     case "artifact_written": return `${event.agent} saved ${event.name}`;
-    case "tests": return `${event.agent}: ${event.passed} passed, ${event.failed} failed`;
+    case "tests": return `${event.agent}: ${event.passed} passed, ${event.failed} failed${event.lint_issues ? `, ${event.lint_issues} lint issues` : ""}`;
     case "blocked": return `${event.agent} is blocked: ${(event.questions || []).join("; ")}`;
     case "result": return `${event.agent}: ${event.status} — ${event.summary}`;
     case "approval": return `Plan approval ${event.status}: ${event.reason || `${event.task_count} tasks`}`;
@@ -210,6 +210,21 @@ class OfficeScene extends Phaser.Scene {
     if (this.motions.get(actor.name) === motion) this.motions.delete(actor.name);
   }
 
+  showBug() {
+    const room = ROOMS.quality;
+    const bug = this.add.container(room.x + room.w - 44, room.y + 64, [
+      this.add.ellipse(0, 0, 20, 15, 0xe05b62).setStrokeStyle(2, 0x501f2a),
+      this.add.circle(-10, -3, 6, 0xe05b62).setStrokeStyle(2, 0x501f2a),
+      this.add.line(-10, -10, -4, -8, -12, -17, 0x501f2a, 1.5),
+      this.add.line(-10, -10, 2, -8, 8, -17, 0x501f2a, 1.5),
+      this.add.line(0, -1, -6, 8, -13, 13, 0x501f2a, 1.5),
+      this.add.line(0, -1, 6, 8, 13, 13, 0x501f2a, 1.5),
+      this.add.text(0, -1, "!", { fontSize: "12px", color: "#fff2dc", fontStyle: "bold" }).setOrigin(0.5),
+    ]).setDepth(15);
+    this.tweens.add({ targets: bug, angle: { from: -10, to: 10 }, duration: 170, yoyo: true, repeat: 7 });
+    this.time.delayedCall(3000, () => bug.destroy());
+  }
+
   cancelMotion(actor) {
     const motion = this.motions.get(actor.name);
     if (!motion) return;
@@ -250,7 +265,10 @@ class OfficeScene extends Phaser.Scene {
     if (event.type === "handoff") {
       const lead = this.actors.get(event.from || "tech_lead");
       const target = this.actors.get(event.to);
-      if (lead && target) await this.move(lead, target.home, animate);
+      if (lead && target) {
+        const debuggerVisit = event.to === "debugger";
+        await this.move(debuggerVisit ? target : lead, debuggerVisit ? lead.home : target.home, animate);
+      }
       this.showBubble(event.from || "tech_lead", event.objective || `Handoff to ${event.to}`);
       return;
     }
@@ -261,6 +279,7 @@ class OfficeScene extends Phaser.Scene {
     const agent = event.agent || (event.type === "approval" ? "tech_lead" : "tech_lead");
     const thought = ["tool_call", "blocked"].includes(event.type);
     this.showBubble(agent, describe(event), thought);
+    if (event.type === "tests" && (event.failed > 0 || event.lint_issues > 0)) this.showBug();
   }
 
   async playEvent(index) {

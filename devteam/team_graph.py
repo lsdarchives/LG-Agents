@@ -21,15 +21,18 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from devteam.artifacts import load_inputs, sync_state
-from devteam.builder import build_agent
+from devteam.artifacts import stack_profile
+from devteam.builder import AgentResult, build_agent
 from devteam.config import (
     CHECKPOINT_DB,
     MAX_ACTIVATIONS,
+    MAX_FIX_LOOPS,
     RECURSION_LIMIT,
     RUNS_ROOT,
     WORKSPACE_ROOT,
 )
 from devteam.events import EventLog
+from devteam.qa import run_task_checks, task_test_path
 from devteam.registry import load_registry
 from devteam.team_state import TeamState, initial_team_state
 from devteam.toolbox import Workspace
@@ -248,7 +251,7 @@ def agent_node(name: str):
     return node
 
 
-def approval_gate(state: TeamState) -> dict:
+def approval_gate(state: TeamState) -> dict | Command:
     """Pause after planning and accept an approval, rejection, or edited task board."""
     ws = workspace_for(state["run_id"])
     current_board = sync_state(ws).get("task_board", state["task_board"])
@@ -269,12 +272,15 @@ def approval_gate(state: TeamState) -> dict:
     if response["action"] == "reject":
         reason = "Plan rejected by human approval."
         log.emit("approval", status="rejected", task_count=len(current_board), reason=reason)
-        return {
-            "status": "partial",
-            "plan_approved": False,
-            "reason": reason,
-            "last_result": {"agent": "human_approval", "status": "rejected", "summary": reason},
-        }
+        return Command(
+            goto="finish",
+            update={
+                "status": "partial",
+                "plan_approved": False,
+                "reason": reason,
+                "last_result": {"agent": "human_approval", "status": "rejected", "summary": reason},
+            },
+        )
 
     board = validate_task_board(response.get("task_board", current_board))
     ws.write_artifact("tasks.json", json.dumps(board, indent=2, ensure_ascii=False))
@@ -282,20 +288,241 @@ def approval_gate(state: TeamState) -> dict:
     replacement = [{"id": task_id, "_delete": True} for task_id in old_ids] + board
     reason = f"Plan approved with {len(board)} tasks."
     log.emit("approval", status="approved", task_count=len(board), reason=reason)
-    return {
-        **sync_state(ws),
-        "task_board": replacement,
-        "status": "done",
-        "plan_approved": True,
-        "reason": reason,
-        "last_result": {"agent": "human_approval", "status": "approved", "summary": reason},
+    return Command(
+        goto="select_task",
+        update={
+            **sync_state(ws),
+            "task_board": replacement,
+            "status": "running",
+            "plan_approved": True,
+            "reason": reason,
+            "last_result": {"agent": "human_approval", "status": "approved", "summary": reason},
+        },
+    )
+
+
+def _task_for_state(state: TeamState) -> dict | None:
+    return next(
+        (task for task in state["task_board"] if task.get("id") == state.get("current_task")),
+        None,
+    )
+
+
+def select_task(state: TeamState) -> Command:
+    """Select the first dependency-ready task or finish the approved implementation run."""
+    tasks = state["task_board"]
+    if not state.get("plan_approved"):
+        reason = "Implementation cannot start before the human approves the plan."
+        return Command(goto="finish", update={"status": "partial", "reason": reason})
+
+    done_ids = {task["id"] for task in tasks if task.get("status") == "done"}
+    selected = next(
+        (
+            task
+            for task in tasks
+            if task.get("status", "todo") == "todo"
+            and set(task.get("depends_on", [])) <= done_ids
+        ),
+        None,
+    )
+    if selected is None:
+        if tasks and all(task.get("status") == "done" for task in tasks):
+            reason = f"All {len(tasks)} approved tasks passed their quality checks."
+            return Command(goto="finish", update={"status": "done", "reason": reason})
+        failed = [task["id"] for task in tasks if task.get("status") == "failed"]
+        reason = (
+            f"Implementation stopped because tasks failed: {', '.join(failed)}."
+            if failed
+            else "Implementation stopped because no unfinished task has satisfied dependencies."
+        )
+        return Command(goto="finish", update={"status": "partial", "reason": reason})
+
+    stack = selected.get("stack") or (stack_profile() or {}).get("name")
+    profile = stack_profile(stack)
+    if not profile or profile.get("language") != "python":
+        reason = f"Step 16 supports Python tasks only; {selected['id']} uses {stack or 'an unknown stack'}."
+        failed = {"id": selected["id"], "status": "failed"}
+        return Command(goto="finish", update={"task_board": [failed], "status": "partial", "reason": reason})
+
+    test_file = task_test_path(selected["id"])
+    update_task = {
+        **selected,
+        "stack": stack,
+        "test_file": test_file,
+        "fix_loops": int(selected.get("fix_loops", 0)),
+        "status": "in_progress",
     }
+    objective = f"Write task-scoped pytest coverage for {selected['id']}: {selected['title']}"
+    events_for(state["run_id"]).emit(
+        "handoff",
+        **{"from": "tech_lead"},
+        to="test_engineer",
+        objective=objective,
+    )
+    return Command(
+        goto="test_engineer",
+        update={
+            "task_board": [update_task],
+            "current_task": selected["id"],
+            "diagnosis": "",
+            "status": "running",
+            "reason": objective,
+        },
+    )
+
+
+def task_agent_node(name: str, next_node: str):
+    """Build the single backend builder path and its test/debugger task agents."""
+    registry = load_registry()
+    spec = registry.get(name)
+
+    def node(state: TeamState) -> dict | Command:
+        if state["activations"] >= MAX_ACTIVATIONS:
+            return Command(
+                goto="finish",
+                update={"status": "partial", "reason": f"maximum of {MAX_ACTIVATIONS} agent activations reached"},
+            )
+        task = _task_for_state(state)
+        if not task:
+            reason = f"{name} was activated without a current task."
+            return Command(goto="finish", update={"status": "partial", "reason": reason})
+
+        ws = workspace_for(state["run_id"])
+        agent = build_agent(spec, registry.shared_rules, task_id=task["id"])
+        objective = f"{name} for {task['id']}: {task['title']}"
+        output = agent(
+            load_inputs(spec.reads, state, ws),
+            ws,
+            events_for(state["run_id"]),
+            objective=objective,
+        )
+        result = output["result"]
+        summary = result.summary
+        update = {
+            "last_result": {"agent": name, **result.model_dump(), "raw": output.get("raw", "")},
+            "activations": 1,
+            "messages": [AIMessage(content=f"{result.status}: {summary}", name=name)],
+        }
+        if name == "debugger":
+            update["diagnosis"] = output.get("raw", "")
+        if result.status != "done":
+            reason = f"{name} {result.status} on {task['id']}: {summary}"
+            events_for(state["run_id"]).emit(
+                "handoff", **{"from": name}, to="finish", objective=f"Stop implementation: {reason}"
+            )
+            update.update(status="partial", reason=reason, task_board=[{"id": task["id"], "status": "failed"}])
+            return Command(goto="finish", update=update)
+
+        handoff_objective = (
+            f"Implement {task['id']} using the approved design and tests"
+            if name == "test_engineer"
+            else f"Run the task quality loop for {task['id']}"
+            if name == "backend_dev"
+            else f"Apply the diagnosis and fix {task['id']}"
+        )
+        events_for(state["run_id"]).emit(
+            "handoff",
+            **{"from": name},
+            to=next_node,
+            objective=handoff_objective,
+        )
+        return Command(goto=next_node, update=update)
+
+    node.__name__ = name
+    return node
+
+
+def qa_runner_node(state: TeamState) -> Command:
+    """Run one task's tests and lint, then advance or request a bounded fix cycle."""
+    if state["activations"] >= MAX_ACTIVATIONS:
+        return Command(
+            goto="finish",
+            update={"status": "partial", "reason": f"maximum of {MAX_ACTIVATIONS} agent activations reached"},
+        )
+    task = _task_for_state(state)
+    if not task:
+        reason = "qa_runner was activated without a current task."
+        return Command(goto="finish", update={"status": "partial", "reason": reason})
+
+    ws = workspace_for(state["run_id"])
+    report = run_task_checks(ws, task["id"], task.get("test_file"))
+    ws.write_artifact("test_report.json", json.dumps(report, indent=2, ensure_ascii=False))
+    log = events_for(state["run_id"])
+    log.emit("artifact_written", agent="qa_runner", name="test_report.json")
+    log.emit(
+        "tests",
+        agent="qa_runner",
+        passed=report["passed"],
+        failed=report["failed"],
+        lint_issues=report["lint_issues"],
+    )
+    checks_passed = report["tests_clean"] and report["lint_clean"]
+    summary = (
+        f"{task['id']} quality checks passed ({report['passed']} tests)."
+        if checks_passed
+        else f"{task['id']} quality checks failed ({report['failed']} test failures, {report['lint_issues']} lint issues)."
+    )
+    update: dict = {
+        "last_result": {
+            "agent": "qa_runner",
+            "status": "done" if checks_passed else "failed",
+            "summary": summary,
+            "report": report,
+        },
+        "activations": 1,
+        "messages": [AIMessage(content=summary, name="qa_runner")],
+    }
+    if checks_passed:
+        log.emit("result", agent="qa_runner", status="done", summary=summary)
+        log.emit(
+            "handoff",
+            **{"from": "qa_runner"},
+            to="tech_lead",
+            objective=f"{task['id']} passed; select the next dependency-ready task",
+        )
+        update.update(
+            task_board=[{"id": task["id"], "status": "done"}],
+            current_task=None,
+            diagnosis="",
+            reason=summary,
+        )
+        return Command(goto="select_task", update=update)
+
+    fix_loops = int(task.get("fix_loops", 0))
+    if fix_loops >= MAX_FIX_LOOPS:
+        reason = f"{task['id']} still fails after {MAX_FIX_LOOPS} debugger fix loops."
+        log.emit("result", agent="qa_runner", status="failed", summary=reason)
+        log.emit("handoff", **{"from": "qa_runner"}, to="finish", objective=reason)
+        update.update(
+            task_board=[{"id": task["id"], "status": "failed", "fix_loops": fix_loops}],
+            status="partial",
+            reason=reason,
+        )
+        return Command(goto="finish", update=update)
+
+    objective = f"Diagnose the failing tests or lint for {task['id']} and identify the code owner"
+    log.emit("result", agent="qa_runner", status="failed", summary=summary)
+    log.emit("handoff", **{"from": "qa_runner"}, to="debugger", objective=objective)
+    update.update(
+        task_board=[{"id": task["id"], "fix_loops": fix_loops + 1}],
+        diagnosis="",
+        reason=summary,
+    )
+    return Command(goto="debugger", update=update)
 
 
 def finish(state: TeamState) -> dict:
     if state["status"] == "partial":
         status = "partial"
         reason = state["reason"] or "run ended before planning was complete"
+    elif state.get("plan_approved"):
+        all_done = bool(state["task_board"]) and all(task.get("status") == "done" for task in state["task_board"])
+        status = "done" if all_done else "partial"
+        reason = state["reason"] or (
+            f"All {len(state['task_board'])} approved tasks passed their quality checks."
+            if all_done
+            else "Implementation ended before every approved task passed its quality checks."
+        )
     else:
         status = "done" if state["task_board"] else "partial"
         reason = f"{len(state['task_board'])} tasks planned" if state["task_board"] else "no task board produced"
@@ -311,8 +538,12 @@ def build_pipeline(checkpointer=None):
         builder.add_node(name, agent_node(name))
         builder.add_edge(name, "tech_lead")
     builder.add_node("approval", approval_gate)
+    builder.add_node("select_task", select_task)
+    builder.add_node("test_engineer", task_agent_node("test_engineer", "backend_dev"))
+    builder.add_node("backend_dev", task_agent_node("backend_dev", "qa_runner"))
+    builder.add_node("qa_runner", qa_runner_node)
+    builder.add_node("debugger", task_agent_node("debugger", "backend_dev"))
     builder.add_node("finish", finish)
-    builder.add_edge("approval", "finish")
     builder.add_edge(START, "tech_lead")
     builder.add_edge("finish", END)
     return builder.compile(checkpointer=checkpointer)

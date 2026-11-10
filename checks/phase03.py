@@ -1,4 +1,4 @@
-r"""Phase 3 live check: the Tech Lead plans a project and resumes after human approval.
+r"""Phase 3 live check: the Tech Lead plans a project and pauses for human approval.
 
 Run: .venv\Scripts\python -X utf8 -m checks.phase03   (needs .env; about 8 model calls)
 """
@@ -8,7 +8,7 @@ import uuid
 from collections import Counter
 
 from devteam.events import read_events
-from devteam.team_graph import PLANNING_AGENTS, RUNS_ROOT, respond_to_plan, start
+from devteam.team_graph import PLANNING_AGENTS, RUNS_ROOT, start
 
 REQUEST = "A tiny API to shorten URLs: POST a long URL, get a short code; GET the code redirects."
 EXPECTED_ROUTES = [*PLANNING_AGENTS, "approval"]
@@ -17,8 +17,6 @@ EXPECTED_ROUTES = [*PLANNING_AGENTS, "approval"]
 def main() -> int:
     run_id = f"check-phase03-{uuid.uuid4().hex[:6]}"
     state = start(REQUEST, run_id)
-    if state["status"] == "awaiting_approval":
-        state = respond_to_plan(run_id, "approve")
     events = read_events(RUNS_ROOT / run_id / "events.jsonl")
     problems = []
 
@@ -45,12 +43,12 @@ def main() -> int:
             problems.append(f"{name} ran {results[name]} times; expected exactly once")
     if not {"prd", "design", "tasks"} <= set(state["artifacts"]):
         problems.append(f"missing planning artifacts: {sorted(state['artifacts'])}")
-    if state["status"] != "done":
+    if state["status"] != "awaiting_approval":
         problems.append(f"final status={state['status']} ({state['reason']})")
-    if not state["plan_approved"]:
-        problems.append("the generated plan was not marked approved")
-    if not events or events[-1]["type"] != "finish":
-        problems.append("event log does not end with finish")
+    if state["plan_approved"]:
+        problems.append("the plan was approved during the planning-only check")
+    if not any(event["type"] == "approval" and event["status"] == "requested" for event in events):
+        problems.append("event log has no approval request")
 
     print(f"routes: {routes}; results: {dict(results)}")
     print(f"artifacts: {sorted(state['artifacts'])}; status: {state['status']}")

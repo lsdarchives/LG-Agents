@@ -21,7 +21,9 @@ def _bad_args_text(exc: Exception) -> str:
 
 
 def workspace_tools(
-    ws: Workspace, handoff_targets: dict[str, list[str]] | list[str] | None = None
+    ws: Workspace,
+    handoff_targets: dict[str, list[str]] | list[str] | None = None,
+    task_id: str | None = None,
 ) -> dict[str, BaseTool]:
     """All workspace tools, bound to `ws`, keyed by the names agents.yaml uses."""
 
@@ -55,6 +57,14 @@ def workspace_tools(
         return ws.read_artifact(name)
 
     fns = [list_tree, view_file, search_files, create_file, edit_file, write_artifact, read_artifact]
+    if task_id:
+        def run_tests() -> str:
+            """Run this task's pytest file and ruff checks in its temporary Python environment."""
+            from devteam.qa import run_task_checks
+
+            return json.dumps(run_task_checks(ws, task_id), ensure_ascii=False)
+
+        fns.append(run_tests)
     if handoff_targets is not None:
         allowed = set(handoff_targets)
         target_reads = handoff_targets if isinstance(handoff_targets, dict) else {}
@@ -106,9 +116,10 @@ def make_tools(
     ws: Workspace,
     names: list[str],
     handoff_targets: dict[str, list[str]] | list[str] | None = None,
+    task_id: str | None = None,
 ) -> tuple[list[BaseTool], list[str]]:
     """Return (tools for `names` that exist, names not implemented yet)."""
-    available = workspace_tools(ws, handoff_targets)
+    available = workspace_tools(ws, handoff_targets, task_id)
     tools = [available[n] for n in names if n in available]
     missing = [n for n in names if n not in available]
     return tools, missing

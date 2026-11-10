@@ -1,4 +1,4 @@
-r"""Phase 2 (step 13) live check: kill a run after its 2nd agent, resume it, and it finishes.
+r"""Phase 2 (step 13) live check: resume planning to its human approval checkpoint.
 
 Starts the planning pipeline in a subprocess, kills it once two agents have reported, resumes it
 from the SQLite checkpoint, then validates the run's events.jsonl.
@@ -54,9 +54,9 @@ def main() -> int:
         problems.append(f"product_manager ran {ran['product_manager']} times (resume should not rerun it)")
     if ran["project_manager"] != 1:
         problems.append("project_manager did not run exactly once after resume")
-    if not any(e["type"] == "finish" for e in events):
-        problems.append("no finish event")
-    if state["status"] != "done":
+    if not any(e["type"] == "approval" and e["status"] == "requested" for e in events):
+        problems.append("no plan approval request")
+    if state["status"] != "awaiting_approval":
         problems.append(f"final status={state['status']} ({state['reason']})")
 
     print(f"events: {len(events)} valid; results per agent: {dict(ran)}")
